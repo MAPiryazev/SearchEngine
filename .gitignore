@@ -1,0 +1,10 @@
+/venv
+# Сырые дампы (гигабайты)
+corpus/raw/wiki/*.bz2
+corpus/raw/wiki/*.xml
+corpus/raw/stackexchange/*.7z
+corpus/raw/stackexchange/*.xml
+
+# Extracted данные (сотни мегабайт)
+corpus/extracted/wiki/*.jsonl
+corpus/extracted/stackexchange/*.jsonl

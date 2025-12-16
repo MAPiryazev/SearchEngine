@@ -2,7 +2,6 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Корень проекта - на 2 уровня выше от utils/
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 # Загружаем .env из корня
@@ -11,12 +10,10 @@ load_dotenv(PROJECT_ROOT / '.env')
 class Config:
     """Конфигурация Python-части из .env"""
     
-    # Пути к данным (относительно корня проекта)
     CORPUS_RAW_DIR = PROJECT_ROOT / os.getenv('CORPUS_RAW_DIR', 'corpus/raw')
     CORPUS_EXTRACTED_DIR = PROJECT_ROOT / os.getenv('CORPUS_EXTRACTED_DIR', 'corpus/extracted')
     CORPUS_ANALYSIS_DIR = PROJECT_ROOT / os.getenv('CORPUS_ANALYSIS_DIR', 'corpus/analysis')
     
-    # Остальное без изменений...
     WIKI_DUMP_URL = os.getenv('WIKI_DUMP_URL')
     WIKI_MIN_DOCS = int(os.getenv('WIKI_MIN_DOCS', 50000))
     WIKI_LANGUAGE = os.getenv('WIKI_LANGUAGE', 'ru')

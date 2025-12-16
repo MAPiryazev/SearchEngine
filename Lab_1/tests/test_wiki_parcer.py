@@ -1,92 +1,71 @@
-#!/usr/bin/env python3
-"""
-Unit-тесты для парсера Википедии
-"""
-
-import sys
 import json
-import tempfile
+import sys
 from pathlib import Path
+
 import pytest
 
-# Добавляем путь к scripts
-sys.path.insert(0, str(Path(__file__).parent.parent / 'scripts'))
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 from extract_wiki import WikiParser
 
 
 class TestWikiParser:
-    """Тесты парсера Википедии"""
-    
     def test_clean_wikitext_removes_templates(self):
-        """Проверка удаления шаблонов {{...}}"""
         parser = WikiParser(None, None)
-        
+
         text = "Текст {{Шаблон|параметр=значение}} продолжение"
         result = parser.clean_wikitext(text)
-        
+
         assert "{{" not in result
         assert "}}" not in result
         assert "Текст" in result
         assert "продолжение" in result
-    
+
     def test_clean_wikitext_removes_file_links(self):
-        """Проверка удаления ссылок на файлы"""
         parser = WikiParser(None, None)
-        
+
         text = "Текст [[Файл:Image.jpg|thumb|Описание]] продолжение"
         result = parser.clean_wikitext(text)
-        
+
         assert "Файл:" not in result
         assert "Image.jpg" not in result
         assert "Текст" in result
         assert "продолжение" in result
-    
+
     def test_clean_wikitext_converts_wiki_links(self):
-        """Проверка преобразования вики-ссылок"""
         parser = WikiParser(None, None)
-        
-        # Простая ссылка
-        text1 = "[[Москва]]"
-        assert parser.clean_wikitext(text1) == "Москва"
-        
-        # Ссылка с текстом
-        text2 = "[[Москва|столица России]]"
-        assert parser.clean_wikitext(text2) == "столица России"
-    
+
+        assert parser.clean_wikitext("[[Москва]]") == "Москва"
+        assert parser.clean_wikitext("[[Москва|столица России]]") == "столица России"
+
     def test_clean_wikitext_removes_html(self):
-        """Проверка удаления HTML тегов"""
         parser = WikiParser(None, None)
-        
+
         text = "Текст <ref>Источник</ref> <div>блок</div> продолжение"
         result = parser.clean_wikitext(text)
-        
+
         assert "<ref>" not in result
         assert "<div>" not in result
         assert "Текст" in result
         assert "продолжение" in result
-    
+
     def test_clean_wikitext_normalizes_whitespace(self):
-        """Проверка нормализации пробелов"""
         parser = WikiParser(None, None)
-        
+
         text = "Текст    с     множественными\n\n\nпробелами"
         result = parser.clean_wikitext(text)
-        
+
         assert "    " not in result
         assert "\n\n" not in result
         assert result == "Текст с множественными пробелами"
-    
+
     def test_clean_wikitext_empty_input(self):
-        """Проверка обработки пустого ввода"""
         parser = WikiParser(None, None)
-        
+
         assert parser.clean_wikitext("") == ""
         assert parser.clean_wikitext(None) == ""
-    
+
     def test_parser_output_format(self, tmp_path):
-        """Проверка формата выходных документов"""
-        # Создаём минимальный XML дамп для теста
-        xml_content = '''<?xml version="1.0" encoding="UTF-8"?>
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
 <mediawiki xmlns="http://www.mediawiki.org/xml/export-0.11/">
   <page>
     <title>Тестовая статья</title>
@@ -98,49 +77,38 @@ class TestWikiParser:
       <text>Это тестовая статья с достаточным количеством текста для прохождения фильтра минимальной длины. Здесь должно быть более ста символов чистого текста после обработки.</text>
     </revision>
   </page>
-</mediawiki>'''
-        
-        # Создаём временные файлы
+</mediawiki>
+"""
         input_file = tmp_path / "test_dump.xml"
         output_file = tmp_path / "test_output.jsonl"
-        
-        input_file.write_text(xml_content, encoding='utf-8')
-        
-        # Запускаем парсер
+
+        input_file.write_text(xml_content, encoding="utf-8")
+
         parser = WikiParser(
             dump_path=input_file,
             output_path=output_file,
-            max_docs=10
+            max_docs=10,
         )
         parser.parse()
-        
-        # Проверяем результат
+
         assert output_file.exists()
-        
-        with open(output_file, 'r', encoding='utf-8') as f:
-            line = f.readline()
-            doc = json.loads(line)
-        
-        # Проверка структуры документа
-        assert 'id' in doc
-        assert 'external_id' in doc
-        assert 'source' in doc
-        assert 'title' in doc
-        assert 'text' in doc
-        assert 'meta' in doc
-        
-        assert doc['source'] == 'wiki'
-        assert doc['title'] == 'Тестовая статья'
-        assert 'тестовая статья' in doc['text'].lower()
-        assert doc['meta']['language'] == 'ru'
+
+        with open(output_file, "r", encoding="utf-8") as f:
+            doc = json.loads(f.readline())
+
+        required_fields = ["id", "external_id", "source", "title", "text", "meta"]
+        for field in required_fields:
+            assert field in doc
+
+        assert doc["source"] == "wiki"
+        assert doc["title"] == "Тестовая статья"
+        assert "тестовая статья" in doc["text"].lower()
+        assert doc["meta"]["language"] == "ru"
 
 
 class TestWikiParserFilters:
-    """Тесты фильтрации документов"""
-    
     def test_filters_service_pages(self, tmp_path):
-        """Проверка фильтрации служебных страниц"""
-        xml_content = '''<?xml version="1.0" encoding="UTF-8"?>
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
 <mediawiki xmlns="http://www.mediawiki.org/xml/export-0.11/">
   <page>
     <title>Википедия:Правила</title>
@@ -150,22 +118,20 @@ class TestWikiParserFilters:
       <text>Служебная страница с большим количеством текста для теста фильтрации служебных страниц Википедии.</text>
     </revision>
   </page>
-</mediawiki>'''
-        
+</mediawiki>
+"""
         input_file = tmp_path / "service_test.xml"
         output_file = tmp_path / "service_output.jsonl"
-        
-        input_file.write_text(xml_content, encoding='utf-8')
-        
+
+        input_file.write_text(xml_content, encoding="utf-8")
+
         parser = WikiParser(input_file, output_file, max_docs=10)
         parser.parse()
-        
-        # Служебная страница не должна попасть в результат
-        assert output_file.stat().st_size == 0 or not output_file.exists()
-    
+
+        assert not output_file.exists() or output_file.stat().st_size == 0
+
     def test_filters_redirects(self, tmp_path):
-        """Проверка фильтрации редиректов"""
-        xml_content = '''<?xml version="1.0" encoding="UTF-8"?>
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
 <mediawiki xmlns="http://www.mediawiki.org/xml/export-0.11/">
   <page>
     <title>Москва-река</title>
@@ -176,19 +142,18 @@ class TestWikiParserFilters:
       <text>#REDIRECT [[Москва (река)]]</text>
     </revision>
   </page>
-</mediawiki>'''
-        
+</mediawiki>
+"""
         input_file = tmp_path / "redirect_test.xml"
         output_file = tmp_path / "redirect_output.jsonl"
-        
-        input_file.write_text(xml_content, encoding='utf-8')
-        
+
+        input_file.write_text(xml_content, encoding="utf-8")
+
         parser = WikiParser(input_file, output_file, max_docs=10)
         parser.parse()
-        
-        # Редирект не должен попасть в результат
-        assert output_file.stat().st_size == 0 or not output_file.exists()
+
+        assert not output_file.exists() or output_file.stat().st_size == 0
 
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

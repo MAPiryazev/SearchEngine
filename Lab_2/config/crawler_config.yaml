@@ -1,0 +1,57 @@
+# Search Engine Crawler Configuration (Lab 2)
+
+db:
+  uri: "mongodb://localhost:27017/"
+  database: "search_engine"
+  collection: "documents"
+  
+  indexes:
+    - fields: ["url"]
+      unique: true
+    - fields: ["source", "external_id"]
+    - fields: ["last_crawled_at"]
+
+logic:
+  delay_between_requests: 0.5
+  delay_between_batches: 2.0
+  recrawl_after_days: 30
+  batch_size: 100
+  max_docs_per_run: null
+  request_timeout: 10
+  max_retries: 3
+  user_agent: "MAI-IR-SearchBot/1.0 (Educational project)"
+
+sources:
+  wikipedia:
+    enabled: true
+    name: "wiki"
+    base_url: "https://ru.wikipedia.org"
+    seed:
+      type: "xml_dump"
+      path: "corpus/raw/wiki/ruwiki-latest-pages-articles.xml.bz2"
+      max_docs: 50000
+    crawl:
+      enabled: true
+      check_updates: true
+  
+  stackoverflow:
+    enabled: true
+    name: "stackoverflow"
+    base_url: "https://ru.stackoverflow.com"
+    seed:
+      type: "xml_dump"
+      path: "corpus/raw/stackexchange/Posts.xml"
+      max_docs: 50000
+    crawl:
+      enabled: true
+      check_updates: true
+
+checkpoints:
+  enabled: true
+  save_every: 500
+  state_file: "corpus/.crawler_state.json"
+
+logging:
+  level: "INFO"
+  file: "logs/crawler.log"
+  console: true

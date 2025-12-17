@@ -4,7 +4,19 @@ db:
   uri: "mongodb://localhost:27017/"
   database: "search_engine"
   collection: "documents"
-  
+
+  indexes:
+    - fields: ["url"]
+      unique: true
+    - fields: ["source", "external_id"]
+    - fields: ["last_crawled_at"]
+
+# Вторая БД: сюда crawler будет писать очищенные документы
+clean_db:
+  uri: "mongodb://localhost:27017/"
+  database: "search_engine_clean"
+  collection: "documents"
+
   indexes:
     - fields: ["url"]
       unique: true
@@ -33,7 +45,7 @@ sources:
     crawl:
       enabled: true
       check_updates: true
-  
+
   stackoverflow:
     enabled: true
     name: "stackoverflow"

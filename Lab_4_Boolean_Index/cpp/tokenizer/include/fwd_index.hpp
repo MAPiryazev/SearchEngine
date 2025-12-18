@@ -5,22 +5,27 @@
 #include <string>
 
 #include "index_format.hpp"
+#include "nostl/strview.hpp"
+#include "nostl/vec.hpp"
 
-struct DocInfo {
-  std::string url;
-  std::string title;
+struct DocInfoView {
+    nostl::StrView url;
+    nostl::StrView title;
 };
 
 class ForwardIndex {
 public:
-  bool open(const std::string& path);
-  std::uint32_t docs() const { return hdr_.docs; }
-  DocInfo get(std::uint32_t doc_id);
+    bool open(const std::string& path);
+    std::uint32_t docs() const { return hdr.docs; }
+
+    DocInfoView get(std::uint32_t docid);
 
 private:
-  std::ifstream in_;
-  FwdHeader hdr_{};
+    std::ifstream in;
+    FwdHeader hdr{};
 
-  static constexpr std::uint64_t kHeaderSize = 4 + 4 + 4 + 8;
-  static constexpr std::uint64_t kRecSize = 8 + 4 + 8 + 4;
+    nostl::Vec<char> pool;
+
+    static constexpr std::uint64_t kHeaderSize = 4 + 4 + 4 + 8;
+    static constexpr std::uint64_t kRecSize    = 8 + 4 + 8 + 4;
 };

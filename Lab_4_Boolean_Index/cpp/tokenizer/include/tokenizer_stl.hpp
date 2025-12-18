@@ -5,11 +5,7 @@
 #include <unordered_map>
 #include <vector>
 
-struct TokenizeOptions {
-  bool keep_numbers = false;
-  bool stem = false;
-  std::size_t min_len = 1;
-};
+#include "tokenizer_api.hpp"
 
 void tokenize_text_tf(const std::string& text, const TokenizeOptions& opt,
                       std::uint64_t& tokens_total,

@@ -1,14 +1,23 @@
 #pragma once
 
-#include <string>
-#include <vector>
+#include <cstddef>
+#include <cstdint>
+
+#include "nostl/vec.hpp"
+#include "nostl/strview.hpp"
+#include "nostl/strpool.hpp"
 
 enum class QTokType { TERM, AND, OR, NOT, LPAREN, RPAREN };
 
 struct QTok {
   QTokType type;
-  std::string text; // только для TERM
+  nostl::StrView text;
 };
 
-std::vector<QTok> lex_query(const std::string& q);
-std::vector<QTok> to_rpn(const std::vector<QTok>& toks);
+struct QueryLexResult {
+  nostl::Vec<QTok> toks;
+  nostl::StrPool pool;
+};
+
+QueryLexResult lex_query(nostl::StrView q);
+nostl::Vec<QTok> to_rpn(const nostl::Vec<QTok>& toks);

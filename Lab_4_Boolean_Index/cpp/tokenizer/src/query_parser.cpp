@@ -3,45 +3,76 @@
 #include <cctype>
 #include <stdexcept>
 
-static std::string to_lower_ascii(std::string s) {
-  for (char& c : s) {
-    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-  }
-  return s;
+static char lower_ascii(char c) {
+  if (c >= 'A' && c <= 'Z') return static_cast<char>(c - 'A' + 'a');
+  return c;
 }
 
-std::vector<QTok> lex_query(const std::string& q) {
-  std::vector<QTok> out;
+static bool ieq_kw(nostl::StrView s, const char* kw, std::size_t kwlen) {
+  if (s.size != kwlen) return false;
+  for (std::size_t i = 0; i < kwlen; ++i) {
+    if (lower_ascii(s.data[i]) != kw[i]) return false;
+  }
+  return true;
+}
+
+static void must_push(nostl::Vec<QTok>& v, const QTok& t) {
+  if (!v.push_back(t)) throw std::runtime_error("oom");
+}
+
+QueryLexResult lex_query(nostl::StrView q) {
+  QueryLexResult res;
+  res.toks.reserve(64);
+  res.pool.reserve(q.size + 1);
+
   std::size_t i = 0;
+  while (i < q.size) {
+    while (i < q.size && std::isspace(static_cast<unsigned char>(q.data[i]))) ++i;
+    if (i >= q.size) break;
 
-  while (i < q.size()) {
-    while (i < q.size() && std::isspace(static_cast<unsigned char>(q[i]))) i++;
-    if (i >= q.size()) break;
-
-    char c = q[i];
-    if (c == '(') { out.push_back({QTokType::LPAREN, ""}); i++; continue; }
-    if (c == ')') { out.push_back({QTokType::RPAREN, ""}); i++; continue; }
+    const char c = q.data[i];
+    if (c == '(') {
+      must_push(res.toks, QTok{QTokType::LPAREN, nostl::StrView(nullptr, 0)});
+      ++i;
+      continue;
+    }
+    if (c == ')') {
+      must_push(res.toks, QTok{QTokType::RPAREN, nostl::StrView(nullptr, 0)});
+      ++i;
+      continue;
+    }
 
     std::size_t j = i;
-    while (j < q.size() && !std::isspace(static_cast<unsigned char>(q[j])) && q[j] != '(' && q[j] != ')') j++;
-    std::string tok = q.substr(i, j - i);
-    std::string low = to_lower_ascii(tok);
+    while (j < q.size &&
+           !std::isspace(static_cast<unsigned char>(q.data[j])) &&
+           q.data[j] != '(' && q.data[j] != ')') {
+      ++j;
+    }
 
-    if (low == "and") out.push_back({QTokType::AND, ""});
-    else if (low == "or") out.push_back({QTokType::OR, ""});
-    else if (low == "not") out.push_back({QTokType::NOT, ""});
-    else out.push_back({QTokType::TERM, tok});
+    nostl::StrView tok(q.data + i, j - i);
+
+    if (ieq_kw(tok, "and", 3)) {
+      must_push(res.toks, QTok{QTokType::AND, nostl::StrView(nullptr, 0)});
+    } else if (ieq_kw(tok, "or", 2)) {
+      must_push(res.toks, QTok{QTokType::OR, nostl::StrView(nullptr, 0)});
+    } else if (ieq_kw(tok, "not", 3)) {
+      must_push(res.toks, QTok{QTokType::NOT, nostl::StrView(nullptr, 0)});
+    } else {
+      nostl::StrView saved = res.pool.add_copy(tok.data, tok.size, true);
+      if (!saved.data) throw std::runtime_error("oom");
+      must_push(res.toks, QTok{QTokType::TERM, saved});
+    }
 
     i = j;
   }
 
-  return out;
+  return res;
 }
 
 static int prec(QTokType t) {
   if (t == QTokType::NOT) return 3;
   if (t == QTokType::AND) return 2;
-  if (t == QTokType::OR) return 1;
+  if (t == QTokType::OR)  return 1;
   return 0;
 }
 
@@ -49,52 +80,63 @@ static bool is_op(QTokType t) {
   return t == QTokType::NOT || t == QTokType::AND || t == QTokType::OR;
 }
 
-std::vector<QTok> to_rpn(const std::vector<QTok>& toks) {
-  std::vector<QTok> out;
-  std::vector<QTok> st;
+nostl::Vec<QTok> to_rpn(const nostl::Vec<QTok>& toks) {
+  nostl::Vec<QTok> out;
+  nostl::Vec<QTok> st;
 
-  for (const auto& t : toks) {
+  out.reserve(toks.size);
+  st.reserve(toks.size);
+
+  for (std::size_t k = 0; k < toks.size; ++k) {
+    const QTok t = toks.data[k];
+
     if (t.type == QTokType::TERM) {
-      out.push_back(t);
+      must_push(out, t);
       continue;
     }
 
     if (is_op(t.type)) {
-      while (!st.empty() && is_op(st.back().type)) {
-        QTokType top = st.back().type;
-        bool right_assoc = (t.type == QTokType::NOT);
+      while (st.size && is_op(st.data[st.size - 1].type)) {
+        QTokType top = st.data[st.size - 1].type;
+        const bool right_assoc = (t.type == QTokType::NOT);
+
         if ((right_assoc && prec(top) > prec(t.type)) ||
             (!right_assoc && prec(top) >= prec(t.type))) {
-          out.push_back(st.back());
-          st.pop_back();
-        } else break;
+          must_push(out, st.data[st.size - 1]);
+          --st.size;
+        } else {
+          break;
+        }
       }
-      st.push_back(t);
+      must_push(st, t);
       continue;
     }
 
     if (t.type == QTokType::LPAREN) {
-      st.push_back(t);
+      must_push(st, t);
       continue;
     }
 
     if (t.type == QTokType::RPAREN) {
-      while (!st.empty() && st.back().type != QTokType::LPAREN) {
-        out.push_back(st.back());
-        st.pop_back();
+      while (st.size && st.data[st.size - 1].type != QTokType::LPAREN) {
+        must_push(out, st.data[st.size - 1]);
+        --st.size;
       }
-      if (st.empty() || st.back().type != QTokType::LPAREN) throw std::runtime_error("mismatched parentheses");
-      st.pop_back();
+      if (!st.size || st.data[st.size - 1].type != QTokType::LPAREN) {
+        throw std::runtime_error("mismatched parentheses");
+      }
+      --st.size;
       continue;
     }
   }
 
-  while (!st.empty()) {
-    if (st.back().type == QTokType::LPAREN || st.back().type == QTokType::RPAREN) {
+  while (st.size) {
+    if (st.data[st.size - 1].type == QTokType::LPAREN ||
+        st.data[st.size - 1].type == QTokType::RPAREN) {
       throw std::runtime_error("mismatched parentheses");
     }
-    out.push_back(st.back());
-    st.pop_back();
+    must_push(out, st.data[st.size - 1]);
+    --st.size;
   }
 
   return out;

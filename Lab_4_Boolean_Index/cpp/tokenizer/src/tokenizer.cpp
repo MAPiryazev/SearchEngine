@@ -1,8 +1,13 @@
-#include "../include/tokenizer.hpp"
+#include "../include/tokenizer_stl.hpp"
 
 #include <algorithm>
 #include <cstddef>
 #include <utility>
+#include "../include/nostl/vec.hpp"
+#include "../include/nostl/strview.hpp"
+#include "../include/nostl/strpool.hpp"
+#include <stdexcept>
+
 
 static bool utf8_decode_one(const std::string& s, std::size_t& i, char32_t& cp) {
   if (i >= s.size()) return false;
@@ -277,4 +282,64 @@ void tokenize_doc_terms(const std::string& text, const TokenizeOptions& opt,
     feed_token_terms(t, len, opt, out_terms);
   };
   tokenize_impl(text, opt, feed);
+}
+
+
+void tokenize_doc_terms_sv(nostl::StrView text,
+                           const TokenizeOptions& opt,
+                           nostl::StrPool& pool,
+                           nostl::Vec<nostl::StrView>& out_terms) {
+    std::string s;
+    if (text.data && text.size) s.assign(text.data, text.size);
+
+    std::vector<std::string> tmp;
+    tmp.reserve(64);
+    tokenize_doc_terms(s, opt, tmp);
+
+    out_terms.clear_keep();
+    if (tmp.size()) out_terms.reserve(tmp.size());
+
+    for (std::size_t i = 0; i < tmp.size(); ++i) {
+        const std::string& t = tmp[i];
+        nostl::StrView v = pool.add_copy(t.data(), t.size(), true);
+        if (!v.data) throw std::runtime_error("oom");
+        if (!out_terms.push_back(v)) throw std::runtime_error("oom");
+    }
+}
+
+void tokenize_text_tf_nostl(nostl::StrView text, const TokenizeOptions& opt,
+                            std::uint64_t& tokens_total,
+                            std::uint64_t& token_chars_total,
+                            nostl::StrPool& pool,
+                            nostl::HashMapSV<std::uint32_t>& tf) {
+    std::string s;
+    if (text.data && text.size) s.assign(text.data, text.size);
+
+    std::unordered_map<std::string, std::uint32_t> tmp;
+    tmp.reserve(1 << 16);
+
+    std::uint64_t dummy_tokens = 0;
+    std::uint64_t dummy_chars = 0;
+    tokenize_text_tf(s, opt, dummy_tokens, dummy_chars, tmp);
+
+    tokens_total += dummy_tokens;
+    token_chars_total += dummy_chars;
+
+    for (const auto& kv : tmp) {
+        const std::string& k = kv.first;
+        const std::uint32_t add = kv.second;
+
+        nostl::StrView probe(k.data(), k.size());
+        std::uint32_t* pv = tf.find(probe);
+        if (pv) {
+            *pv += add;
+        } else {
+            nostl::StrView stored = pool.add_copy(k.data(), k.size(), true);
+            if (!stored.data) throw std::runtime_error("oom");
+            bool inserted = false;
+            pv = tf.get_or_insert(stored, &inserted);
+            if (!pv) throw std::runtime_error("oom");
+            *pv = add;
+        }
+    }
 }

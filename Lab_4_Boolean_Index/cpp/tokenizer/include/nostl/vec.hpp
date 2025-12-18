@@ -1,23 +1,41 @@
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 
 namespace nostl {
 
-template <class T>
+template <typename T>
 struct Vec {
     T* data;
     std::size_t size;
     std::size_t cap;
 
     Vec() : data(nullptr), size(0), cap(0) {}
+
     ~Vec() { clear_free(); }
 
     Vec(const Vec&) = delete;
     Vec& operator=(const Vec&) = delete;
+
+    Vec(Vec&& o) noexcept : data(o.data), size(o.size), cap(o.cap) {
+        o.data = nullptr;
+        o.size = 0;
+        o.cap = 0;
+    }
+
+    Vec& operator=(Vec&& o) noexcept {
+        if (this == &o) return *this;
+        clear_free();
+        data = o.data;
+        size = o.size;
+        cap = o.cap;
+        o.data = nullptr;
+        o.size = 0;
+        o.cap = 0;
+        return *this;
+    }
 
     void clear_free() {
         if (data) std::free(data);
@@ -30,7 +48,7 @@ struct Vec {
 
     T& operator[](std::size_t i) { return data[i]; }
     const T& operator[](std::size_t i) const { return data[i]; }
-
+    
     T* begin() { return data; }
     T* end() { return data + size; }
     const T* begin() const { return data; }
@@ -38,9 +56,16 @@ struct Vec {
 
     bool reserve(std::size_t new_cap) {
         if (new_cap <= cap) return true;
-        void* p = std::realloc(data, new_cap * sizeof(T));
-        if (!p) return false;
-        data = static_cast<T*>(p);
+        
+        T* new_data = static_cast<T*>(std::malloc(new_cap * sizeof(T)));
+        if (!new_data) return false;
+
+        if (data) {
+            std::memcpy(new_data, data, size * sizeof(T));
+            std::free(data);
+        }
+        
+        data = new_data;
         cap = new_cap;
         return true;
     }
@@ -63,7 +88,19 @@ struct Vec {
             std::size_t nc = cap ? cap * 2 : 8;
             if (!reserve(nc)) return false;
         }
-        data[size++] = v;
+        std::memcpy(data + size, &v, sizeof(T));
+        size++;
+        return true;
+    }
+
+    bool push_back(T&& v) {
+        if (size == cap) {
+            std::size_t nc = cap ? cap * 2 : 8;
+            if (!reserve(nc)) return false;
+        }
+        std::memcpy(data + size, &v, sizeof(T));
+        std::memset(&v, 0, sizeof(T));
+        size++;
         return true;
     }
 
@@ -76,7 +113,9 @@ struct Vec {
         return true;
     }
 
-    T pop_back() { return data[--size]; }
+    T pop_back() { 
+        return static_cast<T&&>(data[--size]); 
+    }
 };
 
-}  // namespace nostl
+}

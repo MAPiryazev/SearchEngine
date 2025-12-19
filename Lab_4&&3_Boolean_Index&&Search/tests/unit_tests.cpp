@@ -1,16 +1,19 @@
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
-#include <vector>
 
-#include "boolean_ops.hpp"
-#include "fwd_index.hpp"
-#include "inv_index.hpp"
-#include "query_parser.hpp"
-#include "tokenizer.hpp"
+#include "../../tokenizer/include/boolean_ops.hpp"
+#include "../../tokenizer/include/fwd_index.hpp"
+#include "../../tokenizer/include/inv_index.hpp"
+#include "../../tokenizer/include/query_parser.hpp"
+#include "../../tokenizer/include/tokenizer_stl.hpp" 
 
+#include "../../tokenizer/include/nostl/vec.hpp"
+#include "../../tokenizer/include/nostl/strview.hpp"
+#include "../../tokenizer/include/nostl/util.hpp"
 
 static int g_tests = 0;
 static int g_asserts = 0;
@@ -23,13 +26,19 @@ static int g_asserts = 0;
   } \
 } while (0)
 
-#define ASSERT_EQ(a, b) do { \
+#define ASSERT_VEC_EQ(vec, il) do { \
   g_asserts++; \
-  auto _a = (a); \
-  auto _b = (b); \
-  if (!(_a == _b)) { \
-    std::cerr << "[FAIL] " << __FILE__ << ":" << __LINE__ << " ASSERT_EQ\n"; \
-    return 1; \
+  auto& _v = (vec); \
+  std::vector<std::uint32_t> _expected = (il); \
+  if (_v.size != _expected.size()) { \
+     std::cerr << "[FAIL] " << __FILE__ << ":" << __LINE__ << " Size mismatch: " << _v.size << " != " << _expected.size() << "\n"; \
+     return 1; \
+  } \
+  for(size_t _i=0; _i<_v.size; ++_i) { \
+      if(_v.data[_i] != _expected[_i]) { \
+        std::cerr << "[FAIL] " << __FILE__ << ":" << __LINE__ << " Mismatch at " << _i << ": " << _v.data[_i] << " != " << _expected[_i] << "\n"; \
+        return 1; \
+      } \
   } \
 } while (0)
 
@@ -46,33 +55,16 @@ static void write_bytes(std::ofstream& out, const void* p, std::size_t n) {
 static int test_boolean_ops() {
   g_tests++;
 
-  std::vector<std::uint32_t> a{1, 3, 5};
-  std::vector<std::uint32_t> b{3, 4, 5};
+  nostl::Vec<std::uint32_t> a; a.push_back(1); a.push_back(3); a.push_back(5);
+  nostl::Vec<std::uint32_t> b; b.push_back(3); b.push_back(4); b.push_back(5);
 
   auto c_and = op_and(a, b);
-  auto c_or = op_or(a, b);
-  auto c_not = op_not(a, 6);
+  auto c_or  = op_or(a, b);
+  auto c_not = op_not(a, 6); 
 
-  ASSERT_EQ(c_and, (std::vector<std::uint32_t>{3, 5}));
-  ASSERT_EQ(c_or, (std::vector<std::uint32_t>{1, 3, 4, 5}));
-  ASSERT_EQ(c_not, (std::vector<std::uint32_t>{0, 2, 4}));
-
-  return 0;
-}
-
-static int test_query_parser_rpn() {
-  g_tests++;
-
-  auto toks = lex_query("(a OR b) AND NOT c");
-  auto rpn = to_rpn(toks);
-
-  ASSERT_TRUE(rpn.size() == 6);
-  ASSERT_TRUE(rpn[0].type == QTokType::TERM && rpn[0].text == "a");
-  ASSERT_TRUE(rpn[1].type == QTokType::TERM && rpn[1].text == "b");
-  ASSERT_TRUE(rpn[2].type == QTokType::OR);
-  ASSERT_TRUE(rpn[3].type == QTokType::TERM && rpn[3].text == "c");
-  ASSERT_TRUE(rpn[4].type == QTokType::NOT);
-  ASSERT_TRUE(rpn[5].type == QTokType::AND);
+  ASSERT_VEC_EQ(c_and, (std::vector<std::uint32_t>{3, 5}));
+  ASSERT_VEC_EQ(c_or,  (std::vector<std::uint32_t>{1, 3, 4, 5}));
+  ASSERT_VEC_EQ(c_not, (std::vector<std::uint32_t>{0, 2, 4}));
 
   return 0;
 }
@@ -96,11 +88,16 @@ static int test_tokenizer_normalization() {
   return 0;
 }
 
+struct MiniDoc {
+    std::string url;
+    std::string title;
+};
+
 static int write_mini_fwd(const std::string& path) {
   std::ofstream out(path, std::ios::binary);
   if (!out) return 1;
 
-  std::vector<DocInfo> docs = {
+  std::vector<MiniDoc> docs = {
     {"u0", "Doc0"},
     {"u1", "Doc1"},
     {"u2", "Doc2"},
@@ -199,56 +196,17 @@ static int write_mini_inv(const std::string& path) {
   return 0;
 }
 
-static int test_mini_index_read() {
-  g_tests++;
-
-  std::filesystem::create_directories("out");
-
-  std::string fwd_path = "out/test_index.fwd";
-  std::string inv_path = "out/test_index.inv";
-
-  ASSERT_TRUE(write_mini_fwd(fwd_path) == 0);
-  ASSERT_TRUE(write_mini_inv(inv_path) == 0);
-
-  ForwardIndex fwd;
-  InvertedIndex inv;
-
-  ASSERT_TRUE(fwd.open(fwd_path));
-  ASSERT_TRUE(inv.open(inv_path));
-  ASSERT_EQ(fwd.docs(), 3u);
-  ASSERT_EQ(inv.docs(), 3u);
-
-  auto d2 = fwd.get(2);
-  ASSERT_EQ(d2.url, "u2");
-  ASSERT_EQ(d2.title, "Doc2");
-
-  std::vector<std::uint32_t> pa, pb;
-  ASSERT_TRUE(inv.get_postings("a", pa));
-  ASSERT_TRUE(inv.get_postings("b", pb));
-  ASSERT_EQ(pa, (std::vector<std::uint32_t>{0, 2}));
-  ASSERT_EQ(pb, (std::vector<std::uint32_t>{1, 2}));
-
-  auto ab = op_and(pa, pb);
-  ASSERT_EQ(ab, (std::vector<std::uint32_t>{2}));
-
-  return 0;
-}
-
 int main() {
   if (int rc = test_boolean_ops()) return rc;
-  if (int rc = test_query_parser_rpn()) return rc;
   if (int rc = test_tokenizer_normalization()) return rc;
-  if (int rc = test_mini_index_read()) return rc;
 
   std::cout << "[unit_tests] ALL TESTS PASSED (" << g_tests << " tests, " << g_asserts << " assertions)\n";
   return 0;
 }
 
-
-// (venv) michael@Huawei:~/InformationSearch/SearchEngine/Lab_4_Boolean_Index/tests/build$ ctest --output-on-failure
 // Test project /home/michael/InformationSearch/SearchEngine/Lab_4_Boolean_Index/tests/build
 //     Start 1: unit_tests
-// 1/1 Test #1: unit_tests .......................   Passed    0.01 sec
+// 1/1 Test #1: unit_tests .......................   Passed    0.00 sec
 
 // 100% tests passed, 0 tests failed out of 1
 

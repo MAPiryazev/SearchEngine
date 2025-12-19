@@ -5,6 +5,8 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <chrono>
+
 
 #include <bsoncxx/builder/basic/document.hpp>
 #include <bsoncxx/builder/basic/kvp.hpp>
@@ -160,6 +162,8 @@ static void sort_term_items(nostl::Vec<TermItem>& v) {
 
 int main(int argc, char** argv) {
     try {
+        auto t0 = std::chrono::steady_clock::now();
+
         const char* uri_c = get_arg(argc, argv, "--uri", "mongodb://localhost:27017/");
         const char* db_c  = get_arg(argc, argv, "--db", "search_engine_clean");
         const char* col_c = get_arg(argc, argv, "--col", "documents");
@@ -335,7 +339,6 @@ int main(int argc, char** argv) {
         std::printf("terms=%u\n", terms);
         std::printf("avg_term_len_bytes=%.6f\n", avg_term_len);
 
-        // -------- index.fwd --------
         {
             std::string fwd_path = std::string(out_c) + "/index.fwd";
             std::ofstream out(fwd_path, std::ios::binary);
@@ -363,7 +366,6 @@ int main(int argc, char** argv) {
             std::printf("wrote=%s\n", fwd_path.c_str());
         }
 
-        // -------- index.inv --------
         {
             std::string inv_path = std::string(out_c) + "/index.inv";
             std::ofstream out(inv_path, std::ios::binary);
@@ -412,6 +414,10 @@ int main(int argc, char** argv) {
 
             std::printf("wrote=%s\n", inv_path.c_str());
         }
+
+        auto t1 = std::chrono::steady_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        std::printf("time_ms=%lld\n", (long long)ms);
 
         return 0;
     } catch (const std::exception& e) {

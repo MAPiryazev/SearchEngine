@@ -1,5 +1,4 @@
 services:
-  # MongoDB база данных
   mongodb:
     image: mongo:7.0
     container_name: search_engine_mongodb
@@ -12,9 +11,7 @@ services:
       MONGO_INITDB_DATABASE: search_engine
     
     volumes:
-      # Персистентное хранилище данных
       - mongodb_data:/data/db
-      # Логи MongoDB
       - mongodb_logs:/var/log/mongodb
     
     networks:
@@ -26,7 +23,6 @@ services:
       timeout: 5s
       retries: 5
   
-  # Mongo Express (опционально - веб-интерфейс для MongoDB)
   mongo-express:
     image: mongo-express:latest
     container_name: search_engine_mongo_express
@@ -46,14 +42,12 @@ services:
     networks:
       - search_network
 
-# Volumes для персистентности данных
 volumes:
   mongodb_data:
     driver: local
   mongodb_logs:
     driver: local
 
-# Сеть для взаимодействия контейнеров
 networks:
   search_network:
     driver: bridge

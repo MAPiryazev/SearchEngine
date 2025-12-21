@@ -1,0 +1,12 @@
+/venv
+# Сырые дампы 
+corpus/raw/wiki/*.bz2
+corpus/raw/wiki/*.xml
+corpus/raw/stackexchange/*.7z
+corpus/raw/stackexchange/*.xml
+
+# Extracted данные 
+corpus/extracted/wiki/*.jsonl
+corpus/extracted/stackexchange/*.jsonl
+
+scripts/utils/__pycache__/

@@ -24,8 +24,10 @@ add_executable(unit_tests
   ${BOOLEAN_DIR}/src/core/inv_index.cpp
   ${BOOLEAN_DIR}/src/core/boolean_ops.cpp
   ${BOOLEAN_DIR}/src/core/query_parser.cpp
-)
 
+  ${BOOLEAN_DIR}/src/core/lab6/inv_index6.cpp
+  ${BOOLEAN_DIR}/src/core/lab6/vbyte.cpp
+)
 target_include_directories(unit_tests PRIVATE
   ${BOOLEAN_DIR}/include
 )

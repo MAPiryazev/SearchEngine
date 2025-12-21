@@ -114,3 +114,52 @@ bool InvertedIndex6::get_postings(nostl::StrView term, nostl::Vec<std::uint32_t>
 
     return true;
 }
+
+bool InvertedIndex6::get_postings_tf(nostl::StrView term, nostl::Vec<PostingTF>& out) {
+  if (!in) throw std::runtime_error("inv not opened");
+
+  std::size_t idx = 0;
+  if (!find_term(term, idx)) {
+    out.clear_keep();
+    return false;
+  }
+
+  const auto e = dict.data[idx];
+  out.clear_keep();
+  if (e.postlen == 0) return true;
+
+  nostl::Vec<std::uint8_t> buf;
+  if (!buf.resize(static_cast<std::size_t>(e.postlen))) throw std::runtime_error("oom");
+
+  const std::uint64_t byteoff = hdr.postings_off + e.postoff;
+  in.seekg(static_cast<std::streamoff>(byteoff), std::ios::beg);
+  read_exact(in, buf.data, static_cast<std::size_t>(e.postlen));
+
+  const std::uint8_t* p = buf.data;
+  const std::uint8_t* end = buf.data + buf.size;
+
+  std::uint32_t doc = 0;
+  while (p < end) {
+    std::uint32_t docgap = 0;
+    p = lab6::vbyte_get_u32(p, end, docgap);
+    if (!p) throw std::runtime_error("bad vbyte in docgap");
+
+    doc += docgap;
+
+    std::uint32_t tf = 0;
+    p = lab6::vbyte_get_u32(p, end, tf);
+    if (!p) throw std::runtime_error("bad vbyte in tf");
+
+    PostingTF pt;
+    pt.docid = doc;
+    pt.tf = tf;
+    if (!out.push_back(pt)) throw std::runtime_error("oom");
+
+    for (std::uint32_t i = 0; i < tf; i++) {
+      std::uint32_t posgap = 0;
+      p = lab6::vbyte_get_u32(p, end, posgap);
+      if (!p) throw std::runtime_error("bad vbyte in posgap");
+    }
+  }
+  return true;
+}

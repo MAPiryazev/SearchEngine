@@ -9,6 +9,11 @@
 #include "../nostl/strview.hpp"
 #include "../nostl/vec.hpp"
 
+struct PostingTF {
+  std::uint32_t docid;
+  std::uint32_t tf;
+};
+
 class InvertedIndex6 {
 public:
     bool open(const std::string& path);
@@ -16,6 +21,9 @@ public:
     std::uint32_t docs() const { return hdr.docs; }
 
     bool get_postings(nostl::StrView term, nostl::Vec<std::uint32_t>& out_docs);
+
+    bool get_postings_tf(nostl::StrView term, nostl::Vec<PostingTF>& out);
+
 
 private:
     std::ifstream in;

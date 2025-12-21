@@ -46,3 +46,13 @@ add_executable(bool_search6
   src/core/lab6/vbyte.cpp
 )
 target_link_libraries(bool_search6 PRIVATE tokenizer_lib)
+
+add_executable(rank_search8
+  src/apps/lab8/rank_search8_main.cpp
+  src/core/fwd_index.cpp
+  src/core/boolean_ops.cpp
+  src/core/query_parser.cpp
+  src/core/lab6/inv_index6.cpp
+  src/core/lab6/vbyte.cpp
+)
+target_link_libraries(rank_search8 PRIVATE tokenizer_lib)

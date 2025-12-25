@@ -1,8 +1,8 @@
-#include "search/lab6/inv_index6.hpp"
+#include "search/inv_index6.hpp"
 
 #include <stdexcept>
 
-#include "search/lab6/vbyte.hpp"
+#include "search/vbyte.hpp"
 
 
 nostl::StrView InvertedIndex6::termview(std::size_t i) const {

@@ -24,7 +24,7 @@
 #include "search/nostl/vec.hpp"
 #include "search/tokenizer_api.hpp"
 
-#include "search/lab6/vbyte.hpp"
+#include "search/vbyte.hpp"
 
 static bool cstr_starts_with(const char* s, const char* p) {
     while (*p) {

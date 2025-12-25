@@ -19,17 +19,19 @@ set(BOOLEAN_DIR ${CMAKE_CURRENT_LIST_DIR}/../cpp/boolean)
 
 add_executable(unit_tests
   unit_tests.cpp
-  ${BOOLEAN_DIR}/src/core/tokenizer.cpp
-  ${BOOLEAN_DIR}/src/core/fwd_index.cpp
-  ${BOOLEAN_DIR}/src/core/inv_index.cpp
-  ${BOOLEAN_DIR}/src/core/boolean_ops.cpp
-  ${BOOLEAN_DIR}/src/core/query_parser.cpp
+  ${BOOLEAN_DIR}/common/src/tokenizer.cpp
+  ${BOOLEAN_DIR}/common/src/fwd_index.cpp
+  ${BOOLEAN_DIR}/base/inv_index.cpp
+  ${BOOLEAN_DIR}/common/src/boolean_ops.cpp
+  ${BOOLEAN_DIR}/common/src/query_parser.cpp
 
-  ${BOOLEAN_DIR}/src/core/lab6/inv_index6.cpp
-  ${BOOLEAN_DIR}/src/core/lab6/vbyte.cpp
+  ${BOOLEAN_DIR}/lab6/src/inv_index6.cpp
+  ${BOOLEAN_DIR}/lab6/src/vbyte.cpp
 )
 target_include_directories(unit_tests PRIVATE
-  ${BOOLEAN_DIR}/include
+  ${BOOLEAN_DIR}/common/include
+  ${BOOLEAN_DIR}/base/include
+  ${BOOLEAN_DIR}/lab6/include
 )
 
 target_link_libraries(unit_tests PRIVATE Catch2::Catch2WithMain)

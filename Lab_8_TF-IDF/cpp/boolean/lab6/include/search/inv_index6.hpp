@@ -5,9 +5,9 @@
 #include <fstream>
 #include <string>
 
-#include "../index_format.hpp"
-#include "../nostl/strview.hpp"
-#include "../nostl/vec.hpp"
+#include "search/index_format.hpp"
+#include "search/nostl/strview.hpp"
+#include "search/nostl/vec.hpp"
 
 struct PostingTF {
   std::uint32_t docid;

@@ -5,7 +5,7 @@
 
 #include "search/boolean_ops.hpp"
 #include "search/fwd_index.hpp"
-#include "search/lab6/inv_index6.hpp"
+#include "search/inv_index6.hpp"
 #include "search/nostl/strpool.hpp"
 #include "search/nostl/strview.hpp"
 #include "search/nostl/util.hpp"

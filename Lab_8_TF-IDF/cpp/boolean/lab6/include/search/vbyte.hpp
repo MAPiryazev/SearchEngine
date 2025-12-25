@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "../nostl/vec.hpp"
+#include "search/nostl/vec.hpp"
 
 namespace lab6 {
 

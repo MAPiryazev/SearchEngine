@@ -1,4 +1,4 @@
-#include "search/lab6/vbyte.hpp"
+#include "search/vbyte.hpp"
 
 namespace lab6 {
 

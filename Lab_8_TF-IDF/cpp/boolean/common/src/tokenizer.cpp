@@ -1,4 +1,5 @@
 #include "search/tokenizer_stl.hpp"
+#include "search/stemmer_data.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -125,25 +126,201 @@ static bool ends_with(const std::u32string& s, const std::u32string& suf) {
   return std::equal(suf.rbegin(), suf.rend(), s.rbegin());
 }
 
-static std::string stem_ru_suffix(const std::string& token_utf8) {
+static bool has_vowel(const std::u32string& s) {
+  for (char32_t cp : s) {
+    if (stemmer_data::RU_VOWELS.find(cp) != std::u32string::npos) return true;
+  }
+  return false;
+}
+
+static bool is_cyrillic_token(const std::string& token) {
+  std::u32string s = to_u32(token);
+  for (char32_t cp : s) {
+    if (is_cyrillic(cp)) return true;
+  }
+  return false;
+}
+
+static bool is_latin_token(const std::string& token) {
+  for (char c : token) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return true;
+  }
+  return false;
+}
+
+// Улучшенный стемминг для русского языка
+static std::string stem_ru_advanced(const std::string& token_utf8) {
   std::u32string s = to_u32(token_utf8);
-  if (s.size() < 4) return token_utf8;
-
-  static const std::vector<std::u32string> suffixes = {
-      U"иями", U"ями", U"ами", U"ыми", U"ими",
-      U"ого", U"ему", U"ому", U"ее", U"ие", U"ые", U"ое",
-      U"ей", U"ий", U"ый", U"ая", U"яя", U"ою", U"ею", U"ую", U"юю",
-      U"ам", U"ям", U"ах", U"ях", U"ом", U"ем",
-      U"а", U"я", U"ы", U"и", U"о", U"е", U"у", U"ю", U"ь"
-  };
-
-  for (const auto& suf : suffixes) {
-    if (s.size() > suf.size() + 2 && ends_with(s, suf)) {
-      s.resize(s.size() - suf.size());
-      return from_u32(s);
+  if (s.size() < 3) return token_utf8;
+  
+  // Минимальная длина основы после стемминга
+  const std::size_t min_stem_len = 2;
+  
+  for (const auto& suf : stemmer_data::RU_SUFFIXES) {
+    if (s.size() > suf.size() + min_stem_len && ends_with(s, suf)) {
+      std::u32string stem = s.substr(0, s.size() - suf.size());
+      // Проверяем что в основе есть гласная
+      if (has_vowel(stem)) {
+        return from_u32(stem);
+      }
     }
   }
+  
+  // Удаление мягкого знака в конце
+  if (s.size() > min_stem_len && s.back() == U'ь') {
+    std::u32string stem = s.substr(0, s.size() - 1);
+    if (has_vowel(stem)) {
+      return from_u32(stem);
+    }
+  }
+  
   return token_utf8;
+}
+
+// Упрощенный Porter stemmer для английского
+static bool is_vowel(char c) {
+  return c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u' || c == 'y';
+}
+
+static bool has_vowel_en(const std::string& s) {
+  for (char c : s) {
+    if (is_vowel(c)) return true;
+  }
+  return false;
+}
+
+static bool ends_with_en(const std::string& s, const std::string& suf) {
+  if (s.size() < suf.size()) return false;
+  return s.substr(s.size() - suf.size()) == suf;
+}
+
+static std::string stem_en_porter(const std::string& word) {
+  if (word.size() < 3) return word;
+  
+  std::string s = word;
+  
+  // Step 1a: множественное число и прошедшее время
+  if (ends_with_en(s, "sses") || ends_with_en(s, "ies")) {
+    s = s.substr(0, s.size() - 2);
+  } else if (ends_with_en(s, "ss")) {
+    // ничего не делаем
+  } else if (ends_with_en(s, "s") && s.size() > 3) {
+    s = s.substr(0, s.size() - 1);
+  }
+  
+  // Step 1b: глагольные формы
+  if (ends_with_en(s, "eed")) {
+    if (s.size() > 3) s = s.substr(0, s.size() - 1);
+  } else if (ends_with_en(s, "ed")) {
+    std::string stem = s.substr(0, s.size() - 2);
+    if (has_vowel_en(stem)) {
+      s = stem;
+      if (ends_with_en(s, "at") || ends_with_en(s, "bl") || ends_with_en(s, "iz")) {
+        s += "e";
+      } else if (s.size() >= 2 && s[s.size()-1] == s[s.size()-2] && 
+                 !is_vowel(s[s.size()-1]) && s[s.size()-1] != 'l' && s[s.size()-1] != 's' && s[s.size()-1] != 'z') {
+        s = s.substr(0, s.size() - 1);
+      } else if (s.size() == 3 && !has_vowel_en(s.substr(0, 1)) && has_vowel_en(s.substr(1, 1)) && 
+                 !has_vowel_en(s.substr(2, 1))) {
+        s += "e";
+      }
+    }
+  } else if (ends_with_en(s, "ing")) {
+    std::string stem = s.substr(0, s.size() - 3);
+    if (has_vowel_en(stem)) {
+      s = stem;
+      if (ends_with_en(s, "at") || ends_with_en(s, "bl") || ends_with_en(s, "iz")) {
+        s += "e";
+      } else if (s.size() >= 2 && s[s.size()-1] == s[s.size()-2] && 
+                 !is_vowel(s[s.size()-1]) && s[s.size()-1] != 'l' && s[s.size()-1] != 's' && s[s.size()-1] != 'z') {
+        s = s.substr(0, s.size() - 1);
+      } else if (s.size() == 3 && !has_vowel_en(s.substr(0, 1)) && has_vowel_en(s.substr(1, 1)) && 
+                 !has_vowel_en(s.substr(2, 1))) {
+        s += "e";
+      }
+    }
+  }
+  
+  // Step 1c: замена y на i
+  if (ends_with_en(s, "y") && s.size() > 2) {
+    std::string stem = s.substr(0, s.size() - 1);
+    if (!has_vowel_en(stem)) {
+      s = stem + "i";
+    }
+  }
+  
+  // Step 2: суффиксы
+  for (const auto& p : stemmer_data::EN_STEP2) {
+    if (ends_with_en(s, p.first) && s.size() > p.first.size() + 2) {
+      std::string stem = s.substr(0, s.size() - p.first.size());
+      if (has_vowel_en(stem)) {
+        s = stem + p.second;
+        break;
+      }
+    }
+  }
+  
+  // Step 3: дополнительные суффиксы
+  for (const auto& p : stemmer_data::EN_STEP3) {
+    if (ends_with_en(s, p.first) && s.size() > p.first.size() + 2) {
+      std::string stem = s.substr(0, s.size() - p.first.size());
+      if (has_vowel_en(stem)) {
+        s = stem + p.second;
+        break;
+      }
+    }
+  }
+  
+  // Step 4: финальные суффиксы
+  for (const auto& suf : stemmer_data::EN_STEP4) {
+    if (ends_with_en(s, suf) && s.size() > suf.size() + 2) {
+      std::string stem = s.substr(0, s.size() - suf.size());
+      if (has_vowel_en(stem)) {
+        // Особый случай для -ion: должно быть -sion или -tion
+        if (suf == "ion" && (ends_with_en(stem, "s") || ends_with_en(stem, "t"))) {
+          s = stem;
+        } else if (suf != "ion") {
+          s = stem;
+        }
+        break;
+      }
+    }
+  }
+  
+  // Step 5a и 5b: финальная очистка
+  if (ends_with_en(s, "e") && s.size() > 3) {
+    std::string stem = s.substr(0, s.size() - 1);
+    if (has_vowel_en(stem) && !(stem.size() >= 2 && stem[stem.size()-1] == 'l' && 
+                                 !is_vowel(stem[stem.size()-2]))) {
+      s = stem;
+    }
+  }
+  
+  if (ends_with_en(s, "ll") && s.size() > 3 && has_vowel_en(s.substr(0, s.size()-1))) {
+    s = s.substr(0, s.size() - 1);
+  }
+  
+  return s;
+}
+
+// Главная функция стемминга - определяет язык и применяет соответствующий алгоритм
+static std::string stem_token(const std::string& token) {
+  if (token.size() < 3) return token;
+  
+  bool has_cyr = is_cyrillic_token(token);
+  bool has_lat = is_latin_token(token);
+  
+  // Если есть кириллица - русский стемминг
+  if (has_cyr) {
+    return stem_ru_advanced(token);
+  }
+  // Если только латиница - английский стемминг
+  else if (has_lat) {
+    return stem_en_porter(token);
+  }
+  
+  // Иначе возвращаем как есть
+  return token;
 }
 
 enum class Script { NONE, LAT, CYR };
@@ -166,7 +343,7 @@ static void feed_token_tf(std::string& token, std::size_t token_len,
   }
 
   std::string t = token;
-  if (opt.stem) t = stem_ru_suffix(t);
+  if (opt.stem) t = stem_token(t);
 
   tf[t] += 1;
   tokens_total += 1;
@@ -183,7 +360,7 @@ static void feed_token_terms(std::string& token, std::size_t token_len,
     return;
   }
 
-  if (opt.stem) token = stem_ru_suffix(token);
+  if (opt.stem) token = stem_token(token);
   out_terms.push_back(token);
   token.clear();
 }

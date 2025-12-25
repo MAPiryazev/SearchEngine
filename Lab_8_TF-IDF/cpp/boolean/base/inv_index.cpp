@@ -1,6 +1,4 @@
 #include "search/inv_index.hpp"
-
-
 #include <stdexcept>
 
 nostl::StrView InvertedIndex::termview(std::size_t i) const {
@@ -44,13 +42,13 @@ bool InvertedIndex::open(const std::string& path) {
     termpool.clear_free();
 
     if (!dict.resize(hdr.terms)) throw std::runtime_error("oom");
-    in.seekg(static_cast<std::streamoff>(hdr.dict_off), std::ios::beg);
 
+    in.seekg(static_cast<std::streamoff>(hdr.dict_off), std::ios::beg);
     for (std::uint32_t i = 0; i < hdr.terms; ++i) {
-        dict.data[i].termoff  = read_u64(in);
-        dict.data[i].termlen  = read_u32(in);
-        dict.data[i].postoff  = read_u64(in);
-        dict.data[i].postlen  = read_u32(in);
+        dict.data[i].termoff = read_u64(in);
+        dict.data[i].termlen = read_u32(in);
+        dict.data[i].postoff = read_u64(in);
+        dict.data[i].postlen = read_u32(in);
     }
 
     const std::uint64_t termpoolsize = hdr.postings_off - hdr.term_pool_off;
@@ -73,11 +71,28 @@ bool InvertedIndex::get_postings(nostl::StrView term, nostl::Vec<std::uint32_t>&
 
     const auto& e = dict.data[idx];
     out.clear_keep();
-    if (!out.resize(e.postlen)) throw std::runtime_error("oom");
+
     if (e.postlen == 0) return true;
 
-    const std::uint64_t byteoff = hdr.postings_off + e.postoff;
+    nostl::Vec<std::uint32_t> buf;
+    if (!buf.resize(static_cast<std::size_t>(e.postlen))) throw std::runtime_error("oom");
+
+    const std::uint64_t byteoff = hdr.postings_off + e.postoff * sizeof(std::uint32_t);
     in.seekg(static_cast<std::streamoff>(byteoff), std::ios::beg);
-    read_exact(in, out.data, static_cast<std::size_t>(e.postlen) * sizeof(std::uint32_t));
+    read_exact(in, buf.data, static_cast<std::size_t>(e.postlen) * sizeof(std::uint32_t));
+
+    std::size_t i = 0;
+    while (i < buf.size) {
+        std::uint32_t docid = buf.data[i++];
+        if (i >= buf.size) throw std::runtime_error("bad posting format: missing tf");
+
+        std::uint32_t tf = buf.data[i++];
+
+        if (!out.push_back(docid)) throw std::runtime_error("oom");
+
+        i += tf;
+        if (i > buf.size) throw std::runtime_error("bad posting format: tf exceeds data");
+    }
+
     return true;
 }

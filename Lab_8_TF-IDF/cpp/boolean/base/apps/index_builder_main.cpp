@@ -7,7 +7,6 @@
 #include <string>
 #include <chrono>
 
-
 #include <bsoncxx/builder/basic/document.hpp>
 #include <bsoncxx/builder/basic/kvp.hpp>
 #include <bsoncxx/types.hpp>
@@ -16,7 +15,7 @@
 #include <mongocxx/options/find.hpp>
 #include <mongocxx/uri.hpp>
 
-#include "search/tokenizer_stl.hpp"
+#include "search/tokenizer_api.hpp"
 #include "search/index_format.hpp"
 
 #include "search/nostl/fs.hpp"
@@ -160,6 +159,48 @@ static void sort_term_items(nostl::Vec<TermItem>& v) {
     qsort_term_items(v.data, 0, static_cast<std::ptrdiff_t>(v.size - 1));
 }
 
+struct Occ {
+    std::uint32_t term;
+    std::uint32_t doc;
+    std::uint32_t pos;
+};
+
+static bool occ_less(const Occ& a, const Occ& b) {
+    if (a.term != b.term) return a.term < b.term;
+    if (a.doc != b.doc) return a.doc < b.doc;
+    return a.pos < b.pos;
+}
+
+static void swap_occ(Occ& a, Occ& b) {
+    Occ t = a;
+    a = b;
+    b = t;
+}
+
+static void qsort_occ(Occ* v, std::ptrdiff_t l, std::ptrdiff_t r) {
+    while (l < r) {
+        std::ptrdiff_t i = l, j = r;
+        Occ p = v[l + (r - l) / 2];
+        while (i <= j) {
+            while (occ_less(v[i], p)) ++i;
+            while (occ_less(p, v[j])) --j;
+            if (i <= j) { swap_occ(v[i], v[j]); ++i; --j; }
+        }
+        if (j - l < r - i) {
+            if (l < j) qsort_occ(v, l, j);
+            l = i;
+        } else {
+            if (i < r) qsort_occ(v, i, r);
+            r = j;
+        }
+    }
+}
+
+static void sort_occ(nostl::Vec<Occ>& v) {
+    if (v.size < 2) return;
+    qsort_occ(v.data, 0, static_cast<std::ptrdiff_t>(v.size - 1));
+}
+
 int main(int argc, char** argv) {
     try {
         auto t0 = std::chrono::steady_clock::now();
@@ -209,8 +250,8 @@ int main(int argc, char** argv) {
         nostl::Vec<nostl::StrView> terms_raw;
         terms_raw.reserve(1 << 18);
 
-        nostl::Vec<nostl::PairU32> pairs;
-        pairs.reserve(1 << 20);
+        nostl::Vec<Occ> occ;
+        occ.reserve(1 << 20);
 
         std::uint32_t doc_id = 0;
 
@@ -253,25 +294,22 @@ int main(int argc, char** argv) {
             nostl::StrView textv(sv.data(), static_cast<std::size_t>(sv.size()));
 
             nostl::StrPool doc_pool;
-            nostl::Vec<nostl::StrView> doc_terms;
+            nostl::Vec<TermPos> doc_terms;
             doc_pool.reserve(textv.size + 16);
             doc_terms.reserve(256);
 
-            tokenize_doc_terms_sv(textv, opt, doc_pool, doc_terms);
-
-            nostl::sort_sv(doc_terms);
-            nostl::unique_sv_inplace(doc_terms);
+            tokenize_doc_terms_pos_sv(textv, opt, doc_pool, doc_terms);
 
             for (std::size_t i = 0; i < doc_terms.size; ++i) {
-                nostl::StrView t = doc_terms.data[i];
+                const TermPos tp = doc_terms.data[i];
 
-                std::uint32_t* pid = term_id.find(t);
+                std::uint32_t* pid = term_id.find(tp.term);
                 std::uint32_t idv = 0;
 
                 if (pid) {
                     idv = *pid;
                 } else {
-                    nostl::StrView stored = term_pool.add_copy(t.data, t.size, true);
+                    nostl::StrView stored = term_pool.add_copy(tp.term.data, tp.term.size, true);
                     if (!stored.data) throw std::runtime_error("oom");
 
                     bool inserted = false;
@@ -284,7 +322,11 @@ int main(int argc, char** argv) {
                     if (!terms_raw.push_back(stored)) throw std::runtime_error("oom");
                 }
 
-                if (!pairs.push_back(nostl::PairU32{idv, doc_id})) throw std::runtime_error("oom");
+                Occ o;
+                o.term = idv;
+                o.doc = doc_id;
+                o.pos = tp.pos;
+                if (!occ.push_back(o)) throw std::runtime_error("oom");
             }
 
             ++doc_id;
@@ -308,27 +350,13 @@ int main(int argc, char** argv) {
             remap.data[items.data[i].old_id] = i;
         }
 
-        for (std::size_t i = 0; i < pairs.size; ++i) {
-            pairs.data[i].a = remap.data[pairs.data[i].a];
+        for (std::size_t i = 0; i < occ.size; ++i) {
+            occ.data[i].term = remap.data[occ.data[i].term];
         }
 
-        nostl::sort_pairs(pairs.data, pairs.size);
+        sort_occ(occ);
 
         const std::uint32_t terms = static_cast<std::uint32_t>(items.size);
-
-        nostl::Vec<std::uint32_t> post_len;
-        nostl::Vec<std::uint64_t> post_off;
-        if (!post_len.resize(terms)) throw std::runtime_error("oom");
-        if (!post_off.resize(terms)) throw std::runtime_error("oom");
-
-        for (std::uint32_t i = 0; i < terms; ++i) post_len.data[i] = 0;
-        for (std::size_t i = 0; i < pairs.size; ++i) post_len.data[pairs.data[i].a] += 1;
-
-        std::uint64_t cur_post = 0;
-        for (std::uint32_t i = 0; i < terms; ++i) {
-            post_off.data[i] = cur_post;
-            cur_post += static_cast<std::uint64_t>(post_len.data[i]) * sizeof(std::uint32_t);
-        }
 
         std::uint64_t term_pool_bytes = 0;
         for (std::uint32_t i = 0; i < terms; ++i) term_pool_bytes += items.data[i].term.size;
@@ -366,6 +394,57 @@ int main(int argc, char** argv) {
             std::printf("wrote=%s\n", fwd_path.c_str());
         }
 
+        nostl::Vec<std::uint64_t> post_off;
+        nostl::Vec<std::uint32_t> post_len;
+        if (!post_off.resize(terms)) throw std::runtime_error("oom");
+        if (!post_len.resize(terms)) throw std::runtime_error("oom");
+        for (std::uint32_t i = 0; i < terms; ++i) { post_off.data[i] = 0; post_len.data[i] = 0; }
+
+        nostl::Vec<std::uint32_t> postings;
+
+        std::uint32_t cur_term = 0;
+        std::size_t i = 0;
+        while (i < occ.size) {
+            const std::uint32_t term = occ.data[i].term;
+
+            while (cur_term < term) {
+                post_off.data[cur_term] = static_cast<std::uint64_t>(postings.size);
+                post_len.data[cur_term] = 0;
+                ++cur_term;
+            }
+
+            const std::uint64_t start = static_cast<std::uint64_t>(postings.size);
+            post_off.data[term] = start;
+
+            while (i < occ.size && occ.data[i].term == term) {
+                const std::uint32_t doc = occ.data[i].doc;
+                std::size_t j = i;
+                while (j < occ.size && occ.data[j].term == term && occ.data[j].doc == doc) ++j;
+
+                if (!postings.push_back(doc)) throw std::runtime_error("oom");
+
+                const std::uint32_t tf = static_cast<std::uint32_t>(j - i);
+                if (!postings.push_back(tf)) throw std::runtime_error("oom");
+
+                for (std::size_t k = i; k < j; ++k) {
+                    const std::uint32_t pos = occ.data[k].pos;
+                    if (!postings.push_back(pos)) throw std::runtime_error("oom");
+                }
+
+                i = j;
+            }
+
+            const std::uint64_t end = static_cast<std::uint64_t>(postings.size);
+            post_len.data[term] = static_cast<std::uint32_t>(end - start);
+            if (cur_term == term) ++cur_term;
+        }
+
+        while (cur_term < terms) {
+            post_off.data[cur_term] = static_cast<std::uint64_t>(postings.size);
+            post_len.data[cur_term] = 0;
+            ++cur_term;
+        }
+
         {
             std::string inv_path = std::string(out_c) + "/index.inv";
             std::ofstream out(inv_path, std::ios::binary);
@@ -386,34 +465,33 @@ int main(int argc, char** argv) {
             write_u64(out, term_pool_off);
             write_u64(out, postings_off);
 
-            std::uint64_t cur_term = 0;
-            for (std::uint32_t i = 0; i < terms; ++i) {
-                const nostl::StrView tv = items.data[i].term;
-                const std::uint64_t t_off = cur_term;
+            std::uint64_t cur_term_off = 0;
+            for (std::uint32_t t = 0; t < terms; ++t) {
+                const nostl::StrView tv = items.data[t].term;
+                const std::uint64_t t_off = cur_term_off;
                 const std::uint32_t t_len = static_cast<std::uint32_t>(tv.size);
-                cur_term += t_len;
-
-                const std::uint64_t p_off = post_off.data[i];
-                const std::uint32_t p_len = post_len.data[i];
+                cur_term_off += t_len;
 
                 write_u64(out, t_off);
                 write_u32(out, t_len);
-                write_u64(out, p_off);
-                write_u32(out, p_len);
+                write_u64(out, post_off.data[t]);
+                write_u32(out, post_len.data[t]);
             }
 
-            for (std::uint32_t i = 0; i < terms; ++i) {
-                const nostl::StrView tv = items.data[i].term;
+            for (std::uint32_t t = 0; t < terms; ++t) {
+                const nostl::StrView tv = items.data[t].term;
                 if (tv.size) write_bytes(out, tv.data, tv.size);
             }
 
-            for (std::size_t i = 0; i < pairs.size; ++i) {
-                const std::uint32_t d = pairs.data[i].b;
-                write_bytes(out, &d, sizeof(d));
+            if (postings.size) {
+                write_bytes(out, postings.data, postings.size * sizeof(std::uint32_t));
             }
 
             std::printf("wrote=%s\n", inv_path.c_str());
         }
+
+        std::printf("postings_uint32=%zu\n", postings.size);
+        std::printf("postings_bytes=%zu\n", postings.size * sizeof(std::uint32_t));
 
         auto t1 = std::chrono::steady_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();

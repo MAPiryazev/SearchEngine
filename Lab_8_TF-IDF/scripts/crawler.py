@@ -10,11 +10,12 @@ import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta
 from urllib.parse import quote
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from lxml import etree
 import xml.etree.ElementTree as ET
 from pymongo import MongoClient, ASCENDING
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, BulkWriteError
+
 
 from text_cleaner import clean_stackoverflow_html, clean_wiki_wikitext
 
@@ -29,8 +30,13 @@ class Crawler:
         self.setup_database()
         self.setup_clean_database()
         self.load_checkpoint()
-
-        self.logger.info(f"Инициализация: {self.config_path}")
+        
+        # Буферы для batch inserts
+        self._doc_buffer: List[Dict[str, Any]] = []
+        self._clean_buffer: List[Dict[str, Any]] = []
+        self._batch_size = self.logic.get('batch_size', 5000)
+        
+        self.logger.info(f"Инициализация: {self.config_path}, batch_size={self._batch_size}")
 
     def load_config(self) -> None:
         with open(self.config_path, 'r', encoding='utf-8') as f:
@@ -66,8 +72,16 @@ class Crawler:
 
     def setup_database(self) -> None:
         self.logger.info("Подключение к MongoDB (raw)")
+        
+        # Оптимизация connection pool
+        uri = self.db_config['uri']
+        if 'maxPoolSize' not in uri:
+            if '?' in uri:
+                uri += '&maxPoolSize=50'
+            else:
+                uri += '?maxPoolSize=50'
 
-        self.client = MongoClient(self.db_config['uri'])
+        self.client = MongoClient(uri)
         self.db = self.client[self.db_config['database']]
         self.collection = self.db[self.db_config['collection']]
 
@@ -86,8 +100,16 @@ class Crawler:
             return
 
         self.logger.info("Подключение к MongoDB (clean)")
+        
+        # Оптимизация connection pool
+        uri = self.clean_db_config['uri']
+        if 'maxPoolSize' not in uri:
+            if '?' in uri:
+                uri += '&maxPoolSize=50'
+            else:
+                uri += '?maxPoolSize=50'
 
-        self.clean_client = MongoClient(self.clean_db_config['uri'])
+        self.clean_client = MongoClient(uri)
         self.clean_db = self.clean_client[self.clean_db_config['database']]
         self.clean_collection = self.clean_db[self.clean_db_config['collection']]
 
@@ -122,6 +144,53 @@ class Crawler:
 
         with open(checkpoint_file, 'w', encoding='utf-8') as f:
             json.dump(self.checkpoint, f, ensure_ascii=False, indent=2)
+
+    def insert_document(self, doc: Dict[str, Any]) -> bool:
+        """Добавляет документ в буфер для batch insert."""
+        self._doc_buffer.append(doc)
+        
+        if self.clean_collection is not None:
+            clean_doc = dict(doc)
+            clean_doc.pop('raw_html', None)
+            self._clean_buffer.append(clean_doc)
+        
+        # Автофлаш при достижении batch_size
+        if len(self._doc_buffer) >= self._batch_size:
+            self._flush_buffers()
+        
+        return True
+
+    def _flush_buffers(self) -> int:
+        """Сброс буферов в БД. Возвращает количество вставленных документов."""
+        if not self._doc_buffer:
+            return 0
+        
+        inserted_count = 0
+        
+        try:
+            # ordered=False для продолжения при дубликатах
+            result = self.collection.insert_many(self._doc_buffer, ordered=False)
+            inserted_count = len(result.inserted_ids)
+        except BulkWriteError as e:
+            # Часть документов вставлена, часть - дубликаты
+            inserted_count = e.details.get('nInserted', 0)
+        except Exception as e:
+            self.logger.error(f"Ошибка batch insert в raw: {e}")
+        
+        # Flush в clean БД
+        if self.clean_collection is not None and self._clean_buffer:
+            try:
+                self.clean_collection.insert_many(self._clean_buffer, ordered=False)
+            except BulkWriteError:
+                pass
+            except Exception as e:
+                self.logger.error(f"Ошибка batch insert в clean: {e}")
+        
+        buffer_size = len(self._doc_buffer)
+        self._doc_buffer.clear()
+        self._clean_buffer.clear()
+        
+        return inserted_count
 
     def run(self, mode: str = 'auto') -> None:
         self.logger.info(f"Запуск в режиме: {mode}")
@@ -203,14 +272,18 @@ class Crawler:
 
                     doc = self.process_wiki_page(elem, ns)
 
-                    if doc and self.insert_document(doc):
+                    if doc:
+                        self.insert_document(doc)
                         inserted += 1
 
+                        # Чекпоинт с флашем буфера
                         if inserted % self.checkpoint_config['save_every'] == 0:
+                            flushed = self._flush_buffers()
                             self.checkpoint[checkpoint_key] = processed
                             self.save_checkpoint()
-                            self.logger.info(f"Чекпоинт: обработано {processed}, вставлено {inserted}")
+                            self.logger.info(f"Чекпоинт: обработано {processed}, вставлено {inserted}, сброшено {flushed}")
 
+                    # Очистка памяти для xml.etree.ElementTree
                     elem.clear()
                     root.clear()
 
@@ -220,8 +293,15 @@ class Crawler:
             bz2_file.close()
 
         except KeyboardInterrupt:
+            self.logger.info("Прервано пользователем, сохраняю состояние...")
+            self._flush_buffers()
             self.checkpoint[checkpoint_key] = processed
             self.save_checkpoint()
+            raise
+        finally:
+            # Финальный флаш
+            flushed = self._flush_buffers()
+            self.logger.info(f"Финальный flush: {flushed} документов")
 
         self.logger.info(f"Wikipedia: обработано {processed}, вставлено {inserted}")
         return inserted
@@ -310,14 +390,18 @@ class Crawler:
 
                 doc = self.process_so_post(elem)
 
-                if doc and self.insert_document(doc):
+                if doc:
+                    self.insert_document(doc)
                     inserted += 1
 
+                    # Чекпоинт с флашем буфера
                     if inserted % self.checkpoint_config['save_every'] == 0:
+                        flushed = self._flush_buffers()
                         self.checkpoint[checkpoint_key] = processed
                         self.save_checkpoint()
-                        self.logger.info(f"Чекпоинт: обработано {processed}, вставлено {inserted}")
+                        self.logger.info(f"Чекпоинт: обработано {processed}, вставлено {inserted}, сброшено {flushed}")
 
+                # Агрессивная очистка памяти для lxml
                 elem.clear()
                 while elem.getprevious() is not None:
                     del elem.getparent()[0]
@@ -326,8 +410,15 @@ class Crawler:
                     break
 
         except KeyboardInterrupt:
+            self.logger.info("Прервано пользователем, сохраняю состояние...")
+            self._flush_buffers()
             self.checkpoint[checkpoint_key] = processed
             self.save_checkpoint()
+            raise
+        finally:
+            # Финальный флаш
+            flushed = self._flush_buffers()
+            self.logger.info(f"Финальный flush: {flushed} документов")
 
         self.logger.info(f"Stack Overflow: обработано {processed}, вставлено {inserted}")
         return inserted
@@ -362,23 +453,6 @@ class Crawler:
             }
         except:
             return None
-
-    def insert_document(self, doc: Dict[str, Any]) -> bool:
-        try:
-            self.collection.insert_one(doc)
-
-            if self.clean_collection is not None:
-                clean_doc = dict(doc)
-                clean_doc.pop('raw_html', None)
-
-                try:
-                    self.clean_collection.insert_one(clean_doc)
-                except DuplicateKeyError:
-                    pass
-
-            return True
-        except DuplicateKeyError:
-            return False
 
     def run_recrawl(self) -> None:
         self.logger.info("РЕЖИМ: RECRAWL")

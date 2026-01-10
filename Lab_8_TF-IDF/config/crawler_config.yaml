@@ -41,7 +41,7 @@ sources:
     seed:
       type: "xml_dump"
       path: "corpus/raw/wiki/ruwiki-latest-pages-articles.xml.bz2"
-      max_docs: 50000
+      max_docs: 500000
     crawl:
       enabled: true
       check_updates: true
@@ -53,7 +53,7 @@ sources:
     seed:
       type: "xml_dump"
       path: "corpus/raw/stackexchange/Posts.xml"
-      max_docs: 50000
+      max_docs: 500000
     crawl:
       enabled: true
       check_updates: true

@@ -1,23 +1,21 @@
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include <iostream>
 #include <fstream>
-#include <stdexcept>
 #include <string>
+#include <cstring>
+#include <cstdlib>
 #include <chrono>
-
-#include <bsoncxx/builder/basic/document.hpp>
-#include <bsoncxx/builder/basic/kvp.hpp>
-#include <bsoncxx/types.hpp>
+#include <exception>
+#include <stdexcept>
+#include <vector>
 #include <mongocxx/client.hpp>
 #include <mongocxx/instance.hpp>
-#include <mongocxx/options/find.hpp>
 #include <mongocxx/uri.hpp>
+#include <mongocxx/options/find.hpp>
+#include <bsoncxx/builder/basic/document.hpp>
+#include <bsoncxx/builder/basic/kvp.hpp>
 
 #include "search/tokenizer_api.hpp"
 #include "search/index_format.hpp"
-
 #include "search/nostl/fs.hpp"
 #include "search/nostl/hashmap.hpp"
 #include "search/nostl/sort.hpp"
@@ -99,7 +97,6 @@ static std::string wiki_title_from_url(const std::string& url) {
     const std::string key = "/wiki/";
     std::size_t pos = url.find(key);
     if (pos == std::string::npos) return std::string();
-
     std::string tail = url.substr(pos + key.size());
     std::size_t q = tail.find_first_of("?#");
     if (q != std::string::npos) tail.resize(q);
@@ -206,19 +203,17 @@ int main(int argc, char** argv) {
         auto t0 = std::chrono::steady_clock::now();
 
         const char* uri_c = get_arg(argc, argv, "--uri", "mongodb://localhost:27017/");
-        const char* db_c  = get_arg(argc, argv, "--db", "search_engine_clean");
+        const char* db_c = get_arg(argc, argv, "--db", "search_engine_clean");
         const char* col_c = get_arg(argc, argv, "--col", "documents");
         const char* out_c = get_arg(argc, argv, "--out", "out");
-
         std::int64_t limit_docs = get_arg_i64(argc, argv, "--limit-docs", -1);
 
         TokenizeOptions opt;
         opt.keep_numbers = (std::strcmp(get_arg(argc, argv, "--keep-numbers", "0"), "0") != 0);
-        opt.stem         = (std::strcmp(get_arg(argc, argv, "--stem", "0"), "0") != 0);
-
+        opt.stem = (std::strcmp(get_arg(argc, argv, "--stem", "0"), "0") != 0);
         std::int64_t ml = get_arg_i64(argc, argv, "--min-len", 1);
         if (ml < 1) ml = 1;
-        opt.min_len = static_cast<std::size_t>(ml);
+        opt.min_len = static_cast<std::uint32_t>(ml);
 
         if (nostl::mkdir_p(out_c) != 0) {
             std::fprintf(stderr, "Error: cannot create dir: %s\n", out_c);
@@ -254,7 +249,6 @@ int main(int argc, char** argv) {
         occ.reserve(1 << 20);
 
         std::uint32_t doc_id = 0;
-
         for (auto&& doc : col.find({}, fopts)) {
             auto it_text = doc.find("clean_text");
             if (it_text == doc.end() || it_text->type() != bsoncxx::type::k_string) continue;
@@ -288,7 +282,8 @@ int main(int argc, char** argv) {
             const std::uint32_t title_len = static_cast<std::uint32_t>(title.size());
             if (!pool_append(fwd_pool, title.data(), title.size())) throw std::runtime_error("oom");
 
-            if (!fwd.push_back(DocRec{url_off, url_len, title_off, title_len})) throw std::runtime_error("oom");
+            if (!fwd.push_back(DocRec{url_off, url_len, title_off, title_len}))
+                throw std::runtime_error("oom");
 
             auto sv = it_text->get_string().value;
             nostl::StrView textv(sv.data(), static_cast<std::size_t>(sv.size()));
@@ -302,7 +297,6 @@ int main(int argc, char** argv) {
 
             for (std::size_t i = 0; i < doc_terms.size; ++i) {
                 const TermPos tp = doc_terms.data[i];
-
                 std::uint32_t* pid = term_id.find(tp.term);
                 std::uint32_t idv = 0;
 
@@ -330,7 +324,7 @@ int main(int argc, char** argv) {
             }
 
             ++doc_id;
-            if (limit_docs >= 0 && static_cast<std::int64_t>(doc_id) >= limit_docs) break;
+            if (limit_docs >= 0 && static_cast<std::uint64_t>(doc_id) >= static_cast<std::uint64_t>(limit_docs)) break;
         }
 
         const std::uint32_t docs = doc_id;
@@ -367,8 +361,8 @@ int main(int argc, char** argv) {
         std::printf("terms=%u\n", terms);
         std::printf("avg_term_len_bytes=%.6f\n", avg_term_len);
 
+        std::string fwd_path = std::string(out_c) + "/index.fwd";
         {
-            std::string fwd_path = std::string(out_c) + "/index.fwd";
             std::ofstream out(fwd_path, std::ios::binary);
             if (!out) throw std::runtime_error("cannot open " + fwd_path);
 
@@ -394,76 +388,99 @@ int main(int argc, char** argv) {
             std::printf("wrote=%s\n", fwd_path.c_str());
         }
 
+        fwd.clear_free();
+        fwd_pool.clear_free();
+        terms_raw.clear_free();
+        remap.clear_free();
+
+        std::printf("building inverted index (streaming mode)...\n");
+
+        std::string tmp_postings = std::string(out_c) + "/postings.tmp";
+        std::ofstream post_tmp(tmp_postings, std::ios::binary);
+        if (!post_tmp) throw std::runtime_error("cannot open tmp postings");
+
         nostl::Vec<std::uint64_t> post_off;
         nostl::Vec<std::uint32_t> post_len;
         if (!post_off.resize(terms)) throw std::runtime_error("oom");
         if (!post_len.resize(terms)) throw std::runtime_error("oom");
-        for (std::uint32_t i = 0; i < terms; ++i) { post_off.data[i] = 0; post_len.data[i] = 0; }
 
-        nostl::Vec<std::uint32_t> postings;
+        for (std::uint32_t i = 0; i < terms; ++i) {
+            post_off.data[i] = 0;
+            post_len.data[i] = 0;
+        }
 
+        std::uint64_t postings_count = 0;
         std::uint32_t cur_term = 0;
         std::size_t i = 0;
+
         while (i < occ.size) {
             const std::uint32_t term = occ.data[i].term;
 
             while (cur_term < term) {
-                post_off.data[cur_term] = static_cast<std::uint64_t>(postings.size);
+                post_off.data[cur_term] = postings_count;
                 post_len.data[cur_term] = 0;
                 ++cur_term;
             }
 
-            const std::uint64_t start = static_cast<std::uint64_t>(postings.size);
-            post_off.data[term] = start;
+            post_off.data[term] = postings_count;
+            std::uint32_t term_post_len = 0;
 
             while (i < occ.size && occ.data[i].term == term) {
                 const std::uint32_t doc = occ.data[i].doc;
                 std::size_t j = i;
                 while (j < occ.size && occ.data[j].term == term && occ.data[j].doc == doc) ++j;
 
-                if (!postings.push_back(doc)) throw std::runtime_error("oom");
+                write_u32(post_tmp, doc);
+                term_post_len++;
+                postings_count++;
 
                 const std::uint32_t tf = static_cast<std::uint32_t>(j - i);
-                if (!postings.push_back(tf)) throw std::runtime_error("oom");
+                write_u32(post_tmp, tf);
+                term_post_len++;
+                postings_count++;
 
                 for (std::size_t k = i; k < j; ++k) {
-                    const std::uint32_t pos = occ.data[k].pos;
-                    if (!postings.push_back(pos)) throw std::runtime_error("oom");
+                    write_u32(post_tmp, occ.data[k].pos);
+                    term_post_len++;
+                    postings_count++;
                 }
 
                 i = j;
             }
 
-            const std::uint64_t end = static_cast<std::uint64_t>(postings.size);
-            post_len.data[term] = static_cast<std::uint32_t>(end - start);
+            post_len.data[term] = term_post_len;
             if (cur_term == term) ++cur_term;
         }
 
         while (cur_term < terms) {
-            post_off.data[cur_term] = static_cast<std::uint64_t>(postings.size);
+            post_off.data[cur_term] = postings_count;
             post_len.data[cur_term] = 0;
             ++cur_term;
         }
 
-        {
-            std::string inv_path = std::string(out_c) + "/index.inv";
-            std::ofstream out(inv_path, std::ios::binary);
-            if (!out) throw std::runtime_error("cannot open " + inv_path);
+        post_tmp.close();
+        occ.clear_free();
 
-            const std::uint32_t ver = 1;
-            const std::uint64_t header_size = 4 + 4 + 4 + 4 + 8 + 8 + 8;
+        std::printf("writing inverted index...\n");
+
+        std::string inv_path = std::string(out_c) + "/index.inv";
+        {
+            std::ofstream out2(inv_path, std::ios::binary);
+            if (!out2) throw std::runtime_error("cannot open " + inv_path);
+
+            const std::uint64_t header_size2 = 4 + 4 + 4 + 4 + 8 + 8 + 8;
             const std::uint64_t entry_size = 8 + 4 + 8 + 4;
-            const std::uint64_t dict_off = header_size;
+            const std::uint64_t dict_off = header_size2;
             const std::uint64_t term_pool_off = dict_off + static_cast<std::uint64_t>(terms) * entry_size;
             const std::uint64_t postings_off = term_pool_off + term_pool_bytes;
 
-            write_bytes(out, "INV1", 4);
-            write_u32(out, ver);
-            write_u32(out, docs);
-            write_u32(out, terms);
-            write_u64(out, dict_off);
-            write_u64(out, term_pool_off);
-            write_u64(out, postings_off);
+            write_bytes(out2, "INV1", 4);
+            write_u32(out2, 1);
+            write_u32(out2, docs);
+            write_u32(out2, terms);
+            write_u64(out2, dict_off);
+            write_u64(out2, term_pool_off);
+            write_u64(out2, postings_off);
 
             std::uint64_t cur_term_off = 0;
             for (std::uint32_t t = 0; t < terms; ++t) {
@@ -472,32 +489,44 @@ int main(int argc, char** argv) {
                 const std::uint32_t t_len = static_cast<std::uint32_t>(tv.size);
                 cur_term_off += t_len;
 
-                write_u64(out, t_off);
-                write_u32(out, t_len);
-                write_u64(out, post_off.data[t]);
-                write_u32(out, post_len.data[t]);
+                write_u64(out2, t_off);
+                write_u32(out2, t_len);
+                write_u64(out2, post_off.data[t]);
+                write_u32(out2, post_len.data[t]);
             }
 
             for (std::uint32_t t = 0; t < terms; ++t) {
                 const nostl::StrView tv = items.data[t].term;
-                if (tv.size) write_bytes(out, tv.data, tv.size);
+                if (tv.size) write_bytes(out2, tv.data, tv.size);
             }
 
-            if (postings.size) {
-                write_bytes(out, postings.data, postings.size * sizeof(std::uint32_t));
+            std::ifstream post_in(tmp_postings, std::ios::binary);
+            if (!post_in) throw std::runtime_error("cannot read tmp postings");
+
+            const std::size_t buf_sz = 1 << 20;
+            char* buf = static_cast<char*>(std::malloc(buf_sz));
+            if (!buf) throw std::runtime_error("oom buffer");
+
+            while (post_in.read(buf, buf_sz) || post_in.gcount() > 0) {
+                out2.write(buf, post_in.gcount());
             }
+            std::free(buf);
+            post_in.close();
 
             std::printf("wrote=%s\n", inv_path.c_str());
         }
 
-        std::printf("postings_uint32=%zu\n", postings.size);
-        std::printf("postings_bytes=%zu\n", postings.size * sizeof(std::uint32_t));
+        std::remove(tmp_postings.c_str());
+
+        std::printf("postings_uint32=%llu\n", (unsigned long long)postings_count);
+        std::printf("postings_bytes=%llu\n", (unsigned long long)(postings_count * 4));
 
         auto t1 = std::chrono::steady_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
         std::printf("time_ms=%lld\n", (long long)ms);
 
         return 0;
+
     } catch (const std::exception& e) {
         std::fprintf(stderr, "Error: %s\n", e.what());
         return 1;

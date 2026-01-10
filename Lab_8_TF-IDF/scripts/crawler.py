@@ -5,24 +5,25 @@ import time
 import logging
 import bz2
 import re
-import requests
 import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta
 from urllib.parse import quote
 from typing import Optional, Dict, Any, List
+
 from lxml import etree
 import xml.etree.ElementTree as ET
-from pymongo import MongoClient, ASCENDING
+from pymongo import MongoClient, ASCENDING, UpdateOne
 from pymongo.errors import DuplicateKeyError, BulkWriteError
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from text_cleaner import clean_stackoverflow_html, clean_wiki_wikitext
 
 
 class Crawler:
-    """Робот для обкачки документов из дампов и обновления по URL."""
-
     def __init__(self, config_path: str):
         self.config_path = Path(config_path)
         self.load_config()
@@ -31,17 +32,29 @@ class Crawler:
         self.setup_clean_database()
         self.load_checkpoint()
         
-        # Буферы для batch inserts
         self._doc_buffer: List[Dict[str, Any]] = []
         self._clean_buffer: List[Dict[str, Any]] = []
+        self._update_buffer: List[UpdateOne] = []
         self._batch_size = self.logic.get('batch_size', 5000)
         
+        self.session = self._create_session()
         self.logger.info(f"Инициализация: {self.config_path}, batch_size={self._batch_size}")
+
+    def _create_session(self):
+        session = requests.Session()
+        retry = Retry(
+            total=self.logic.get('max_retries', 3),
+            backoff_factor=0.5,
+            status_forcelist=(500, 502, 503, 504)
+        )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+        return session
 
     def load_config(self) -> None:
         with open(self.config_path, 'r', encoding='utf-8') as f:
             self.config = yaml.safe_load(f)
-
         self.db_config = self.config['db']
         self.clean_db_config = self.config.get('clean_db')
         self.logic = self.config['logic']
@@ -52,19 +65,17 @@ class Crawler:
         log_config = self.config['logging']
         log_file = Path(log_config['file'])
         log_file.parent.mkdir(parents=True, exist_ok=True)
-
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-
+        
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        
         self.logger = logging.getLogger('Crawler')
         self.logger.setLevel(log_config['level'])
-
+        
         if not self.logger.handlers:
             file_handler = logging.FileHandler(log_file, encoding='utf-8')
             file_handler.setFormatter(formatter)
             self.logger.addHandler(file_handler)
-
+            
             if log_config.get('console', True):
                 console_handler = logging.StreamHandler()
                 console_handler.setFormatter(formatter)
@@ -72,24 +83,19 @@ class Crawler:
 
     def setup_database(self) -> None:
         self.logger.info("Подключение к MongoDB (raw)")
-        
-        # Оптимизация connection pool
         uri = self.db_config['uri']
         if 'maxPoolSize' not in uri:
-            if '?' in uri:
-                uri += '&maxPoolSize=50'
-            else:
-                uri += '?maxPoolSize=50'
-
+            uri += '&maxPoolSize=50' if '?' in uri else '?maxPoolSize=50'
+        
         self.client = MongoClient(uri)
         self.db = self.client[self.db_config['database']]
         self.collection = self.db[self.db_config['collection']]
-
+        
         for idx_config in self.db_config.get('indexes', []):
             fields = [(f, ASCENDING) for f in idx_config['fields']]
             unique = idx_config.get('unique', False)
             self.collection.create_index(fields, unique=unique)
-
+        
         doc_count = self.collection.count_documents({})
         self.logger.info(f"Документов в raw базе: {doc_count}")
 
@@ -98,26 +104,21 @@ class Crawler:
         if not self.clean_db_config:
             self.logger.info("clean_db не задан — чистая БД отключена")
             return
-
-        self.logger.info("Подключение к MongoDB (clean)")
         
-        # Оптимизация connection pool
+        self.logger.info("Подключение к MongoDB (clean)")
         uri = self.clean_db_config['uri']
         if 'maxPoolSize' not in uri:
-            if '?' in uri:
-                uri += '&maxPoolSize=50'
-            else:
-                uri += '?maxPoolSize=50'
-
+            uri += '&maxPoolSize=50' if '?' in uri else '?maxPoolSize=50'
+        
         self.clean_client = MongoClient(uri)
         self.clean_db = self.clean_client[self.clean_db_config['database']]
         self.clean_collection = self.clean_db[self.clean_db_config['collection']]
-
+        
         for idx_config in self.clean_db_config.get('indexes', []):
             fields = [(f, ASCENDING) for f in idx_config['fields']]
             unique = idx_config.get('unique', False)
             self.clean_collection.create_index(fields, unique=unique)
-
+        
         doc_count = self.clean_collection.count_documents({})
         self.logger.info(f"Документов в clean базе: {doc_count}")
 
@@ -125,59 +126,61 @@ class Crawler:
         if not self.checkpoint_config['enabled']:
             self.checkpoint = {}
             return
-
+        
         checkpoint_file = Path(self.checkpoint_config['state_file'])
-
+        self.checkpoint = {}
+        
         if checkpoint_file.exists():
-            with open(checkpoint_file, 'r', encoding='utf-8') as f:
-                self.checkpoint = json.load(f)
-            self.logger.info(f"Загружен чекпоинт: {self.checkpoint}")
+            try:
+                with open(checkpoint_file, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content:
+                        self.checkpoint = json.loads(content)
+                        self.logger.info(f"Загружен чекпоинт: {self.checkpoint}")
+                    else:
+                        self.logger.warning("Файл чекпоинта пуст, начинаем заново")
+                        self.checkpoint = {}
+            except json.JSONDecodeError as e:
+                self.logger.error(f"Ошибка парсинга чекпоинта: {e}, начинаем заново")
+                self.checkpoint = {}
         else:
-            self.checkpoint = {}
+            self.logger.info("Чекпоинт не найден, начинаем с нуля")
 
     def save_checkpoint(self) -> None:
         if not self.checkpoint_config['enabled']:
             return
-
+        
         checkpoint_file = Path(self.checkpoint_config['state_file'])
         checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
-
+        
         with open(checkpoint_file, 'w', encoding='utf-8') as f:
             json.dump(self.checkpoint, f, ensure_ascii=False, indent=2)
 
     def insert_document(self, doc: Dict[str, Any]) -> bool:
-        """Добавляет документ в буфер для batch insert."""
         self._doc_buffer.append(doc)
-        
         if self.clean_collection is not None:
             clean_doc = dict(doc)
             clean_doc.pop('raw_html', None)
             self._clean_buffer.append(clean_doc)
         
-        # Автофлаш при достижении batch_size
         if len(self._doc_buffer) >= self._batch_size:
             self._flush_buffers()
         
         return True
 
     def _flush_buffers(self) -> int:
-        """Сброс буферов в БД. Возвращает количество вставленных документов."""
         if not self._doc_buffer:
             return 0
         
         inserted_count = 0
-        
         try:
-            # ordered=False для продолжения при дубликатах
             result = self.collection.insert_many(self._doc_buffer, ordered=False)
             inserted_count = len(result.inserted_ids)
         except BulkWriteError as e:
-            # Часть документов вставлена, часть - дубликаты
             inserted_count = e.details.get('nInserted', 0)
         except Exception as e:
             self.logger.error(f"Ошибка batch insert в raw: {e}")
         
-        # Flush в clean БД
         if self.clean_collection is not None and self._clean_buffer:
             try:
                 self.clean_collection.insert_many(self._clean_buffer, ordered=False)
@@ -186,124 +189,147 @@ class Crawler:
             except Exception as e:
                 self.logger.error(f"Ошибка batch insert в clean: {e}")
         
-        buffer_size = len(self._doc_buffer)
         self._doc_buffer.clear()
         self._clean_buffer.clear()
-        
         return inserted_count
+
+    def _flush_update_buffer(self) -> int:
+        if not self._update_buffer:
+            return 0
+        
+        try:
+            result = self.collection.bulk_write(self._update_buffer, ordered=False)
+            updated = result.modified_count
+            self._update_buffer.clear()
+            return updated
+        except BulkWriteError as e:
+            self._update_buffer.clear()
+            return e.details.get('nModified', 0)
+        except Exception as e:
+            self.logger.error(f"Ошибка bulk update: {e}")
+            self._update_buffer.clear()
+            return 0
 
     def run(self, mode: str = 'auto') -> None:
         self.logger.info(f"Запуск в режиме: {mode}")
-
-        if mode == 'auto':
-            mode = self.determine_mode()
-
-        if mode == 'seed':
-            self.run_seed()
-        elif mode == 'recrawl':
-            self.run_recrawl()
+        try:
+            if mode == 'auto':
+                mode = self.determine_mode()
+            
+            if mode == 'seed':
+                self.run_seed()
+            elif mode == 'recrawl':
+                self.run_recrawl()
+            else:
+                self.logger.info("Нет действий для выполнения")
+        except KeyboardInterrupt:
+            self.logger.info("Прервано пользователем, финальный сброс...")
+            self._flush_buffers()
+            self._flush_update_buffer()
+            self.save_checkpoint()
+            raise
+        except Exception as e:
+            self.logger.error(f"Критическая ошибка: {e}", exc_info=True)
+            self._flush_buffers()
+            self._flush_update_buffer()
+            self.save_checkpoint()
+            raise
 
     def determine_mode(self) -> Optional[str]:
         doc_count = self.collection.count_documents({})
-
+        
         if doc_count == 0:
             self.logger.info("База пустая, режим SEED")
             return 'seed'
-
+        
         threshold = datetime.now() - timedelta(days=self.logic['recrawl_after_days'])
         old_docs = self.collection.count_documents({
             'last_crawled_at': {'$lt': threshold.timestamp()}
         })
-
+        
         if old_docs > 0:
             self.logger.info(f"Найдено {old_docs} старых документов, режим RECRAWL")
             return 'recrawl'
-
+        
         self.logger.info("Все документы актуальны")
         return None
 
     def run_seed(self) -> None:
         self.logger.info("РЕЖИМ: SEED")
-
         total_inserted = 0
-
+        
         if self.sources['wikipedia']['enabled']:
             total_inserted += self.seed_wikipedia()
-
+        
         if self.sources['stackoverflow']['enabled']:
             total_inserted += self.seed_stackoverflow()
-
+        
+        self._flush_buffers()
         self.logger.info(f"SEED завершен. Документов: {total_inserted}")
 
     def seed_wikipedia(self) -> int:
         self.logger.info("Обработка Wikipedia")
-
         source_config = self.sources['wikipedia']
         seed_config = source_config['seed']
-
         dump_path = Path(seed_config['path'])
+        
         if not dump_path.exists():
             self.logger.warning(f"Дамп не найден: {dump_path}")
             return 0
-
+        
         max_docs = seed_config.get('max_docs')
         checkpoint_key = 'wiki_processed'
         start_from = self.checkpoint.get(checkpoint_key, 0)
-
         processed = 0
         inserted = 0
-
+        
         try:
             bz2_file = bz2.open(dump_path, 'rb')
             context = ET.iterparse(bz2_file, events=('start', 'end'))
-
             event, root = next(context)
+            
             match = re.match(r'\{.*\}', root.tag)
             ns = match.group(0) if match else ''
-
+            
             for event, elem in context:
                 if event == 'end' and elem.tag == f'{ns}page':
                     processed += 1
-
+                    
                     if processed <= start_from:
                         elem.clear()
                         root.clear()
                         continue
-
+                    
                     doc = self.process_wiki_page(elem, ns)
-
                     if doc:
                         self.insert_document(doc)
                         inserted += 1
-
-                        # Чекпоинт с флашем буфера
-                        if inserted % self.checkpoint_config['save_every'] == 0:
-                            flushed = self._flush_buffers()
-                            self.checkpoint[checkpoint_key] = processed
-                            self.save_checkpoint()
-                            self.logger.info(f"Чекпоинт: обработано {processed}, вставлено {inserted}, сброшено {flushed}")
-
-                    # Очистка памяти для xml.etree.ElementTree
+                    
+                    if inserted % self.checkpoint_config['save_every'] == 0:
+                        flushed = self._flush_buffers()
+                        self.checkpoint[checkpoint_key] = processed
+                        self.save_checkpoint()
+                        self.logger.info(f"Чекпоинт: обработано {processed}, вставлено {inserted}, сброшено {flushed}")
+                    
                     elem.clear()
                     root.clear()
-
+                    
                     if max_docs and inserted >= max_docs:
                         break
-
+            
             bz2_file.close()
-
         except KeyboardInterrupt:
             self.logger.info("Прервано пользователем, сохраняю состояние...")
             self._flush_buffers()
             self.checkpoint[checkpoint_key] = processed
             self.save_checkpoint()
             raise
+        except Exception as e:
+            self.logger.error(f"Ошибка в seed_wikipedia: {e}", exc_info=True)
         finally:
-            # Финальный флаш
             flushed = self._flush_buffers()
-            self.logger.info(f"Финальный flush: {flushed} документов")
-
-        self.logger.info(f"Wikipedia: обработано {processed}, вставлено {inserted}")
+            self.logger.info(f"Wikipedia: обработано {processed}, вставлено {inserted}, финальный flush: {flushed}")
+        
         return inserted
 
     def process_wiki_page(self, page_elem, ns: str) -> Optional[Dict[str, Any]]:
@@ -311,40 +337,38 @@ class Crawler:
             title_elem = page_elem.find(f'{ns}title')
             if title_elem is None or not title_elem.text:
                 return None
-
+            
             title = title_elem.text
-
+            
             if ':' in title:
                 prefix = title.split(':', 1)[0]
                 if prefix in ['Википедия', 'Wikipedia', 'Обсуждение', 'Участник',
                               'Шаблон', 'Template', 'Файл', 'File', 'Категория', 'Category',
                               'Портал', 'Проект', 'Справка', 'MediaWiki', 'Модуль']:
                     return None
-
+            
             if page_elem.find(f'{ns}redirect') is not None:
                 return None
-
+            
             page_id_elem = page_elem.find(f'{ns}id')
             page_id = page_id_elem.text if page_id_elem is not None else None
-
+            
             revision = page_elem.find(f'{ns}revision')
             if revision is None:
                 return None
-
+            
             text_elem = revision.find(f'{ns}text')
             if text_elem is None or not text_elem.text or len(text_elem.text) < 100:
                 return None
-
+            
             timestamp_elem = revision.find(f'{ns}timestamp')
             timestamp_str = timestamp_elem.text if timestamp_elem is not None else None
-
+            
             url = f"https://ru.wikipedia.org/wiki/{quote(title.replace(' ', '_'))}"
-
             raw = text_elem.text
             clean = clean_wiki_wikitext(raw)
-
             ts = datetime.now().timestamp()
-
+            
             return {
                 'url': url,
                 'raw_html': raw,
@@ -357,86 +381,81 @@ class Crawler:
                 'title': title,
                 'timestamp': timestamp_str
             }
-        except:
+        except Exception as e:
+            self.logger.debug(f"Ошибка обработки wiki страницы: {e}")
             return None
 
     def seed_stackoverflow(self) -> int:
         self.logger.info("Обработка Stack Overflow")
-
         source_config = self.sources['stackoverflow']
         seed_config = source_config['seed']
-
         posts_xml = Path(seed_config['path'])
+        
         if not posts_xml.exists():
             self.logger.warning(f"Файл не найден: {posts_xml}")
             return 0
-
+        
         max_docs = seed_config.get('max_docs')
         checkpoint_key = 'so_processed'
         start_from = self.checkpoint.get(checkpoint_key, 0)
-
         processed = 0
         inserted = 0
-
+        
         try:
             context = etree.iterparse(str(posts_xml), events=('end',), tag='row')
-
+            
             for event, elem in context:
                 processed += 1
-
+                
                 if processed <= start_from:
                     elem.clear()
                     continue
-
+                
                 doc = self.process_so_post(elem)
-
                 if doc:
                     self.insert_document(doc)
                     inserted += 1
-
-                    # Чекпоинт с флашем буфера
-                    if inserted % self.checkpoint_config['save_every'] == 0:
-                        flushed = self._flush_buffers()
-                        self.checkpoint[checkpoint_key] = processed
-                        self.save_checkpoint()
-                        self.logger.info(f"Чекпоинт: обработано {processed}, вставлено {inserted}, сброшено {flushed}")
-
-                # Агрессивная очистка памяти для lxml
+                
+                if inserted % self.checkpoint_config['save_every'] == 0:
+                    flushed = self._flush_buffers()
+                    self.checkpoint[checkpoint_key] = processed
+                    self.save_checkpoint()
+                    self.logger.info(f"Чекпоинт: обработано {processed}, вставлено {inserted}, сброшено {flushed}")
+                
                 elem.clear()
                 while elem.getprevious() is not None:
                     del elem.getparent()[0]
-
+                
                 if max_docs and inserted >= max_docs:
                     break
-
         except KeyboardInterrupt:
             self.logger.info("Прервано пользователем, сохраняю состояние...")
             self._flush_buffers()
             self.checkpoint[checkpoint_key] = processed
             self.save_checkpoint()
             raise
+        except Exception as e:
+            self.logger.error(f"Ошибка в seed_stackoverflow: {e}", exc_info=True)
         finally:
-            # Финальный флаш
             flushed = self._flush_buffers()
-            self.logger.info(f"Финальный flush: {flushed} документов")
-
-        self.logger.info(f"Stack Overflow: обработано {processed}, вставлено {inserted}")
+            self.logger.info(f"Stack Overflow: обработано {processed}, вставлено {inserted}, финальный flush: {flushed}")
+        
         return inserted
 
     def process_so_post(self, row_elem) -> Optional[Dict[str, Any]]:
         try:
             if row_elem.get('PostTypeId') != '1':
                 return None
-
+            
             post_id = row_elem.get('Id')
             body = row_elem.get('Body')
-
+            
             if not body or len(body) < 50:
                 return None
-
+            
             clean = clean_stackoverflow_html(body, keep_code=False)
             ts = datetime.now().timestamp()
-
+            
             return {
                 'url': f"https://ru.stackoverflow.com/questions/{post_id}",
                 'raw_html': body,
@@ -451,14 +470,14 @@ class Crawler:
                 'tags': row_elem.get('Tags', ''),
                 'score': int(row_elem.get('Score', '0'))
             }
-        except:
+        except Exception as e:
+            self.logger.debug(f"Ошибка обработки SO поста: {e}")
             return None
 
     def run_recrawl(self) -> None:
         self.logger.info("РЕЖИМ: RECRAWL")
 
         threshold = datetime.now() - timedelta(days=self.logic['recrawl_after_days'])
-
         query = {
             '$or': [
                 {'last_crawled_at': {'$exists': False}},
@@ -475,11 +494,14 @@ class Crawler:
         max_docs = self.logic.get('max_docs_per_run')
         cursor = self.collection.find(query).limit(max_docs or total)
 
+        checked = 0
         updated = 0
+        started = time.time()
 
         for doc in cursor:
-            new_html = self.fetch_url(doc['url'])
+            checked += 1
 
+            new_html = self.fetch_url(doc['url'])
             if new_html:
                 old_hash = hashlib.md5(doc['raw_html'].encode()).hexdigest()
                 new_hash = hashlib.md5(new_html.encode()).hexdigest()
@@ -487,37 +509,104 @@ class Crawler:
                 if old_hash != new_hash:
                     self.collection.update_one(
                         {'_id': doc['_id']},
-                        {'$set': {'raw_html': new_html, 'last_crawled_at': datetime.now().timestamp()}}
+                        {'$set': {
+                            'raw_html': new_html,
+                            'last_crawled_at': datetime.now().timestamp()
+                        }}
                     )
                     updated += 1
+
+            if checked % 100 == 0:
+                elapsed = time.time() - started
+                rate = checked / elapsed if elapsed > 0 else 0.0
+                eta_sec = (total - checked) / rate if rate > 0 else -1
+                eta_min = eta_sec / 60 if eta_sec > 0 else -1
+                self.logger.info(
+                    f"RECRAWL прогресс: {checked}/{total} проверено, {updated} обновлено, "
+                    f"{rate:.2f} док/с, ETA {eta_min:.1f} мин"
+                )
 
             time.sleep(self.logic['delay_between_requests'])
 
         self.logger.info(f"RECRAWL завершен. Обновлено: {updated}")
 
+    def _recrawl_document(self, doc: Dict[str, Any]) -> Optional[tuple]:
+        try:
+            new_html = self.fetch_url(doc['url'])
+            
+            if new_html:
+                old_hash = hashlib.md5(doc['raw_html'].encode()).hexdigest()
+                new_hash = hashlib.md5(new_html.encode()).hexdigest()
+                
+                if old_hash != new_hash:
+                    source = doc.get('source', 'unknown')
+                    
+                    if source == 'stackoverflow':
+                        clean = clean_stackoverflow_html(new_html, keep_code=False)
+                    elif source == 'wiki':
+                        clean = clean_wiki_wikitext(new_html)
+                    else:
+                        clean = new_html
+                    
+                    ts = datetime.now().timestamp()
+                    
+                    update_op = UpdateOne(
+                        {'_id': doc['_id']},
+                        {'$set': {
+                            'raw_html': new_html,
+                            'clean_text': clean,
+                            'clean_len': len(clean),
+                            'clean_version': doc.get('clean_version', 1) + 1,
+                            'last_crawled_at': ts
+                        }}
+                    )
+                    
+                    if self.clean_collection:
+                        try:
+                            clean_doc = dict(doc)
+                            clean_doc.pop('raw_html', None)
+                            clean_doc['clean_text'] = clean
+                            clean_doc['clean_len'] = len(clean)
+                            clean_doc['clean_version'] = doc.get('clean_version', 1) + 1
+                            clean_doc['last_crawled_at'] = ts
+                            
+                            self.clean_collection.update_one(
+                                {'_id': doc['_id']},
+                                {'$set': clean_doc},
+                                upsert=True
+                            )
+                        except Exception as e:
+                            self.logger.debug(f"Ошибка обновления clean БД: {e}")
+                    
+                    return (doc['_id'], update_op)
+        except Exception as e:
+            self.logger.debug(f"Ошибка при переобкачке {doc['url']}: {e}")
+        
+        return None
+
     def fetch_url(self, url: str) -> Optional[str]:
         headers = {'User-Agent': self.logic['user_agent']}
-
-        for attempt in range(self.logic['max_retries']):
-            try:
-                response = requests.get(url, headers=headers, timeout=self.logic['request_timeout'])
-                if response.status_code == 200:
-                    return response.text
-            except:
-                time.sleep(1)
-
+        timeout = self.logic.get('request_timeout', 10)
+        
+        try:
+            response = self.session.get(url, headers=headers, timeout=timeout)
+            if response.status_code == 200:
+                return response.text
+        except Exception as e:
+            self.logger.debug(f"Ошибка fetch {url}: {e}")
+        
         return None
 
 
 def main():
     import argparse
-
+    
     parser = argparse.ArgumentParser(description='Поисковый робот')
     parser.add_argument('config', help='Путь к YAML конфигу')
     parser.add_argument('--mode', choices=['auto', 'seed', 'recrawl'], default='auto')
-
+    
     args = parser.parse_args()
-
+    
     crawler = Crawler(args.config)
     crawler.run(mode=args.mode)
 

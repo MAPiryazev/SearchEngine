@@ -4,19 +4,16 @@ db:
   uri: "mongodb://localhost:27017/"
   database: "search_engine"
   collection: "documents"
-
   indexes:
     - fields: ["url"]
       unique: true
     - fields: ["source", "external_id"]
     - fields: ["last_crawled_at"]
 
-# Вторая БД: сюда crawler будет писать очищенные документы
 clean_db:
   uri: "mongodb://localhost:27017/"
   database: "search_engine_clean"
   collection: "documents"
-
   indexes:
     - fields: ["url"]
       unique: true
@@ -24,13 +21,14 @@ clean_db:
     - fields: ["last_crawled_at"]
 
 logic:
-  delay_between_requests: 0.5
-  delay_between_batches: 2.0
+  delay_between_requests: 0.3
+  delay_between_batches: 1.0
   recrawl_after_days: 30
-  batch_size: 100
+  batch_size: 200
   max_docs_per_run: null
-  request_timeout: 10
+  request_timeout: 15
   max_retries: 3
+  max_workers: 8
   user_agent: "MAI-IR-SearchBot/1.0 (Educational project)"
 
 sources:
@@ -45,7 +43,7 @@ sources:
     crawl:
       enabled: true
       check_updates: true
-
+  
   stackoverflow:
     enabled: true
     name: "stackoverflow"
